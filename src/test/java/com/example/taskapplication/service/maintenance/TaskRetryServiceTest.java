@@ -4,6 +4,8 @@ import com.example.taskapplication.exception.TaskNotFoundException;
 import com.example.taskapplication.model.Task;
 import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
+import com.example.taskapplication.service.security.TaskAccessService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -12,6 +14,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.AuthorityUtils;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -38,7 +43,16 @@ class TaskRetryServiceTest {
 
     @BeforeEach
     void setUp() {
-        taskRetryService = new TaskRetryService(taskRepository);
+        SecurityContextHolder.getContext().setAuthentication(
+            UsernamePasswordAuthenticationToken.authenticated("user1", "unused",
+                AuthorityUtils.createAuthorityList("ROLE_USER"))
+        );
+        taskRetryService = new TaskRetryService(taskRepository, new TaskAccessService());
+    }
+
+    @AfterEach
+    void clearSecurityContext() {
+        SecurityContextHolder.clearContext();
     }
 
     @Test
@@ -67,6 +81,7 @@ class TaskRetryServiceTest {
         assertThat(task.getCreatedAt()).isEqualTo(CREATED_AT);
         assertThat(task.getMaxAttempts()).isEqualTo(3);
         assertThat(task.getVersion()).isEqualTo(5L);
+        assertThat(task.getOwnerUsername()).isEqualTo("user1");
     }
 
     @ParameterizedTest
@@ -93,10 +108,84 @@ class TaskRetryServiceTest {
             .hasMessage("Task with ID 7 was not found");
     }
 
+    @Test
+    @DisplayName("A foreign task is hidden and its execution state is not reset")
+    void rejectsForeignTaskWithoutChangingIt() {
+        Task task = createTask(TaskStatus.FAILED);
+        task.setOwnerUsername("another-user");
+        Task original = createTask(TaskStatus.FAILED);
+        original.setOwnerUsername("another-user");
+        when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        assertThatThrownBy(() -> taskRetryService.retryFailedTask(TASK_ID))
+            .isInstanceOf(TaskNotFoundException.class)
+            .hasMessage("Task with ID 7 was not found");
+
+        assertThat(task).usingRecursiveComparison().isEqualTo(original);
+    }
+
+    @Test
+    @DisplayName("A foreign non-failed task is hidden before its status is checked")
+    void hidesForeignTaskBeforeCheckingStatus() {
+        Task task = createTask(TaskStatus.NEW);
+        task.setOwnerUsername("another-user");
+        when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        assertThatThrownBy(() -> taskRetryService.retryFailedTask(TASK_ID))
+            .isInstanceOf(TaskNotFoundException.class);
+    }
+
+    @Test
+    @DisplayName("A user cannot retry a legacy task without an owner")
+    void rejectsLegacyTaskForUser() {
+        Task task = createTask(TaskStatus.FAILED);
+        task.setOwnerUsername(null);
+        when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        assertThatThrownBy(() -> taskRetryService.retryFailedTask(TASK_ID))
+            .isInstanceOf(TaskNotFoundException.class);
+
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.FAILED);
+        assertThat(task.getAttempts()).isEqualTo(3);
+    }
+
+    @Test
+    @DisplayName("An administrator can retry a legacy failed task without taking ownership")
+    void adminRetriesLegacyTask() {
+        SecurityContextHolder.getContext().setAuthentication(
+            UsernamePasswordAuthenticationToken.authenticated("admin", "unused",
+                AuthorityUtils.createAuthorityList("ROLE_ADMIN"))
+        );
+        Task task = createTask(TaskStatus.FAILED);
+        task.setOwnerUsername(null);
+        when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        assertThat(taskRetryService.retryFailedTask(TASK_ID)).isTrue();
+
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.NEW);
+        assertThat(task.getAttempts()).isZero();
+        assertThat(task.getOwnerUsername()).isNull();
+    }
+
+    @Test
+    @DisplayName("Missing authentication cannot reset a failed task")
+    void rejectsUnauthenticatedRetry() {
+        SecurityContextHolder.clearContext();
+        Task task = createTask(TaskStatus.FAILED);
+        when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        assertThatThrownBy(() -> taskRetryService.retryFailedTask(TASK_ID))
+            .isInstanceOf(TaskNotFoundException.class);
+
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.FAILED);
+        assertThat(task.getAttempts()).isEqualTo(3);
+    }
+
     private Task createTask(TaskStatus status) {
         Task task = new Task();
         task.setId(TASK_ID);
         task.setEventId(EVENT_ID);
+        task.setOwnerUsername("user1");
         task.setName("My task");
         task.setDuration(2500L);
         task.setStatus(status);

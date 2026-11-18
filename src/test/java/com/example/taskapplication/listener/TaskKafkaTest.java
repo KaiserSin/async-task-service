@@ -2,12 +2,14 @@ package com.example.taskapplication.listener;
 
 import com.example.taskapplication.config.KafkaConfig;
 import com.example.taskapplication.dto.TaskRequestDTO;
+import com.example.taskapplication.health.KafkaListenerHealthCheck;
 import com.example.taskapplication.model.Task;
 import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
 import com.example.taskapplication.service.database.DatabaseFailureClassifier;
 import com.example.taskapplication.service.registration.TaskRegistrationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.validation.Validator;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -35,13 +37,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.actuate.health.Status;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.listener.ConcurrentMessageListenerContainer;
 import org.springframework.kafka.listener.DefaultAfterRollbackProcessor;
 import org.springframework.kafka.listener.MessageListener;
@@ -62,6 +67,8 @@ import org.testcontainers.kafka.ConfluentKafkaContainer;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -72,11 +79,19 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
-@DataJpaTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
+@DataJpaTest(properties = {
+    "spring.jpa.hibernate.ddl-auto=validate",
+    "kafka.listener.database-retry-delay-ms=3000"
+})
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 @Import({KafkaConfig.class, DatabaseFailureClassifier.class, TaskRegistrationService.class, TaskKafkaTest.Config.class})
@@ -105,6 +120,9 @@ class TaskKafkaTest {
 
     @Autowired
     private Validator validator;
+
+    @Autowired
+    private DataSource dataSource;
 
     @Autowired
     private ConcurrentKafkaListenerContainerFactory<String, TaskRequestDTO> kafkaListenerContainerFactory;
@@ -178,6 +196,7 @@ class TaskKafkaTest {
         Task saved = findTask(dto.getEventId());
         assertThat(saved).usingRecursiveComparison().isEqualTo(before);
         assertThat(saved.getName()).isEqualTo("Task");
+        assertThat(saved.getOwnerUsername()).isEqualTo(dto.getOwnerUsername());
         assertThat(saved.getDuration()).isEqualTo(dto.getDuration());
         assertThat(saved.getStatus()).isEqualTo(TaskStatus.NEW);
         assertThat(readDlt()).isEmpty();
@@ -228,7 +247,7 @@ class TaskKafkaTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"name", "duration"})
+    @ValueSource(strings = {"name", "duration", "ownerUsername"})
     @DisplayName("A duplicate with different parameters is rejected and sent to DLT")
     void rejectsChangedTask(String field) throws Exception {
         startListener();
@@ -237,6 +256,8 @@ class TaskKafkaTest {
         Task before = findTask(dto.getEventId());
         if (field.equals("name")) {
             dto.setName("Another task");
+        } else if (field.equals("ownerUsername")) {
+            dto.setOwnerUsername("bob");
         } else {
             dto.setDuration(2000L);
         }
@@ -258,6 +279,23 @@ class TaskKafkaTest {
         startListener();
         TaskRequestDTO dto = request();
         dto.setDuration(0L);
+
+        RecordMetadata sent = send(dto);
+        awaitOffset(sent);
+
+        assertThat(taskRepository.count()).isZero();
+        ConsumerRecord<String, byte[]> dlt = readOneDlt();
+        assertThat(objectMapper.readTree(dlt.value()))
+            .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(dto)));
+        assertOrigin(dlt, sent, dto.getEventId().toString());
+    }
+
+    @Test
+    @DisplayName("A message without an owner is sent to DLT without registering an unowned task")
+    void rejectsMessageWithoutOwner() throws Exception {
+        startListener();
+        TaskRequestDTO dto = request();
+        dto.setOwnerUsername(null);
 
         RecordMetadata sent = send(dto);
         awaitOffset(sent);
@@ -326,6 +364,34 @@ class TaskKafkaTest {
     }
 
     @Test
+    @DisplayName("A three-partition source can publish failures to a one-partition DLT")
+    void publishesToDltWithFewerPartitions() throws Exception {
+        topic = "tasks-partition-test-" + UUID.randomUUID();
+        createTopic(topic, 3);
+        createTopic(topic + ".DLT");
+        listen(taskListener::receive, 3);
+        TaskRequestDTO invalid = request();
+        invalid.setDuration(0L);
+        String key = invalid.getEventId().toString();
+
+        RecordMetadata rejected = send(2, key, objectMapper.writeValueAsBytes(invalid));
+        awaitOffset(rejected);
+
+        assertThat(rejected.partition()).isEqualTo(2);
+        ConsumerRecord<String, byte[]> dlt = readOneDlt();
+        assertOrigin(dlt, rejected, key);
+        assertThat(objectMapper.readTree(dlt.value()))
+            .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(invalid)));
+        assertThat(taskRepository.count()).isZero();
+
+        TaskRequestDTO valid = request();
+        awaitOffset(send(2, valid.getEventId().toString(), objectMapper.writeValueAsBytes(valid)));
+        assertThat(findTask(valid.getEventId()).getName()).isEqualTo("Task");
+        assertThat(container.isRunning()).isTrue();
+        assertThat(readDlt()).hasSize(1);
+    }
+
+    @Test
     @DisplayName("Malformed JSON is sent to DLT with its original bytes")
     void sendsBrokenJson() throws Exception {
         createTopic(topic + ".DLT");
@@ -377,9 +443,93 @@ class TaskKafkaTest {
         assertOrigin(dlt, sent, key);
     }
 
+    @Test
+    @DisplayName("Read-only failover pauses without committing and automatically retries after recovery")
+    void resumesAfterReadOnlyFailover() throws Exception {
+        createTopic(topic + ".DLT");
+        AtomicBoolean readOnly = new AtomicBoolean(true);
+        AtomicReference<String> sqlState = new AtomicReference<>();
+        List<ConsumerRecord<String, TaskRequestDTO>> deliveries = new CopyOnWriteArrayList<>();
+        listen(record -> {
+            deliveries.add(record);
+            if (readOnly.get()) {
+                try (Connection connection = dataSource.getConnection()) {
+                    connection.setReadOnly(true);
+                    connection.setAutoCommit(false);
+                    try (var statement = connection.prepareStatement("""
+                        INSERT INTO tasks (event_id, name, duration, owner_username)
+                        VALUES (?, ?, ?, ?)
+                        """)) {
+                        statement.setObject(1, record.value().getEventId());
+                        statement.setString(2, record.value().getName());
+                        statement.setLong(3, record.value().getDuration());
+                        statement.setString(4, record.value().getOwnerUsername());
+                        statement.executeUpdate();
+                    } finally {
+                        connection.rollback();
+                    }
+                } catch (SQLException failure) {
+                    sqlState.set(failure.getSQLState());
+                    throw new DataAccessResourceFailureException("Failover database is read-only", failure);
+                }
+            } else {
+                taskListener.receive(record);
+            }
+        });
+        KafkaListenerEndpointRegistry registry = mock(KafkaListenerEndpointRegistry.class);
+        when(registry.getListenerContainers()).thenReturn(List.of(container));
+
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        try {
+            var health = new KafkaListenerHealthCheck(registry, meters);
+            TaskRequestDTO first = request();
+            RecordMetadata sent = send(first);
+
+            try {
+                await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+                    assertThat(sqlState.get()).isEqualTo("25006");
+                    assertThat(container.isRunning()).isTrue();
+                    assertThat(container.getContainers()).anySatisfy(child ->
+                        assertThat(child.isPauseRequested()).isTrue());
+                    assertThat(health.health().getStatus()).isEqualTo(Status.DOWN);
+                    assertThat(meters.get("task.kafka.listener.ready").gauge().value()).isZero();
+                });
+                assertNotCommitted(sent);
+                assertThat(taskRepository.count()).isZero();
+            } finally {
+                readOnly.set(false);
+            }
+
+            awaitOffset(sent);
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+                assertThat(health.health().getStatus()).isEqualTo(Status.UP);
+                assertThat(meters.get("task.kafka.listener.ready").gauge().value()).isEqualTo(1);
+            });
+            TaskRequestDTO next = request();
+            awaitOffset(send(next));
+
+            assertThat(container.isRunning()).isTrue();
+            assertThat(taskRepository.count()).isEqualTo(2);
+            assertThat(findTask(first.getEventId()).getName()).isEqualTo("Task");
+            assertThat(findTask(next.getEventId()).getName()).isEqualTo("Task");
+            List<ConsumerRecord<String, TaskRequestDTO>> redelivered = deliveries.stream()
+                .filter(record -> first.getEventId().equals(record.value().getEventId()))
+                .toList();
+            assertThat(redelivered).hasSizeGreaterThanOrEqualTo(2);
+            assertThat(redelivered).allSatisfy(record -> {
+                assertThat(record.offset()).isEqualTo(sent.offset());
+                assertThat(record.partition()).isEqualTo(sent.partition());
+            });
+            assertThat(readDlt()).isEmpty();
+        } finally {
+            meters.close();
+        }
+    }
+
     private TaskRequestDTO request() {
         TaskRequestDTO dto = new TaskRequestDTO();
         dto.setEventId(UUID.randomUUID());
+        dto.setOwnerUsername("alice");
         dto.setName("  Task  ");
         dto.setDuration(1000L);
         return dto;
@@ -390,7 +540,11 @@ class TaskKafkaTest {
     }
 
     private void createTopic(String name) throws Exception {
-        admin.createTopics(List.of(new NewTopic(name, 1, (short) 1)))
+        createTopic(name, 1);
+    }
+
+    private void createTopic(String name, int partitions) throws Exception {
+        admin.createTopics(List.of(new NewTopic(name, partitions, (short) 1)))
             .all().get(10, TimeUnit.SECONDS);
     }
 
@@ -400,13 +554,19 @@ class TaskKafkaTest {
     }
 
     private void listen(MessageListener<String, TaskRequestDTO> listener) {
+        listen(listener, 1);
+    }
+
+    private void listen(MessageListener<String, TaskRequestDTO> listener, int partitions) {
         container = kafkaListenerContainerFactory.createContainer(topic);
         container.setBeanName(group);
         container.getContainerProperties().setGroupId(group);
         container.setupMessageListener(listener);
         container.start();
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
-            assertThat(container.getAssignedPartitions()).containsExactly(new TopicPartition(topic, 0))
+            assertThat(container.getAssignedPartitions()).containsExactlyInAnyOrderElementsOf(
+                java.util.stream.IntStream.range(0, partitions)
+                    .mapToObj(partition -> new TopicPartition(topic, partition)).toList())
         );
     }
 
@@ -415,7 +575,11 @@ class TaskKafkaTest {
     }
 
     private RecordMetadata send(String key, byte[] value) throws Exception {
-        return producer.send(new ProducerRecord<>(topic, 0, key, value))
+        return send(0, key, value);
+    }
+
+    private RecordMetadata send(int partition, String key, byte[] value) throws Exception {
+        return producer.send(new ProducerRecord<>(topic, partition, key, value))
             .get(15, TimeUnit.SECONDS);
     }
 
@@ -472,7 +636,7 @@ class TaskKafkaTest {
 
     private void assertOrigin(ConsumerRecord<String, byte[]> dlt, RecordMetadata sent, String key) {
         assertThat(dlt.topic()).isEqualTo(topic + ".DLT");
-        assertThat(dlt.partition()).isEqualTo(sent.partition());
+        assertThat(dlt.partition()).isZero();
         assertThat(dlt.key()).isEqualTo(key);
         assertThat(new String(dlt.headers().lastHeader(KafkaHeaders.DLT_ORIGINAL_TOPIC).value(),
             StandardCharsets.UTF_8)).isEqualTo(sent.topic());

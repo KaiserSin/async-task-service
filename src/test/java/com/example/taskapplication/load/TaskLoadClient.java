@@ -115,6 +115,7 @@ class TaskLoadClient implements AutoCloseable {
             UUID eventId = UUID.randomUUID();
             TaskRequestDTO dto = new TaskRequestDTO();
             dto.setEventId(eventId);
+            dto.setOwnerUsername("alice");
             dto.setName("Load task " + eventId);
             dto.setDuration(duration);
             long now = System.nanoTime();

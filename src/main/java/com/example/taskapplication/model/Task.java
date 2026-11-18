@@ -30,6 +30,9 @@ public class Task {
     @Column(name = "event_id", nullable = false, unique = true)
     private UUID eventId;
 
+    @Column(name = "owner_username", length = 255)
+    private String ownerUsername;
+
     @Column(nullable = false, length = 255)
     private String name;
 

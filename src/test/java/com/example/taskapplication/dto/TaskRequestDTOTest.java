@@ -58,6 +58,44 @@ class TaskRequestDTOTest {
     }
 
     @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "\t\n"})
+    @DisplayName("Rejects a missing or blank owner")
+    void rejectsMissingOwner(String ownerUsername) {
+        TaskRequestDTO dto = validRequest();
+        dto.setOwnerUsername(ownerUsername);
+
+        assertThat(validator.validate(dto))
+            .extracting(violation -> violation.getPropertyPath().toString())
+            .containsOnly("ownerUsername");
+    }
+
+    @ParameterizedTest
+    @MethodSource("controlCharacters")
+    @DisplayName("Rejects control characters in the owner's identity")
+    void rejectsControlCharacterInOwner(int codePoint) {
+        TaskRequestDTO dto = validRequest();
+        dto.setOwnerUsername("alice" + (char) codePoint + "smith");
+
+        assertThat(validator.validate(dto))
+            .extracting(violation -> violation.getPropertyPath().toString())
+            .containsExactly("ownerUsername");
+    }
+
+    @Test
+    @DisplayName("Accepts the owner length limit and rejects longer identities")
+    void validatesOwnerLength() {
+        TaskRequestDTO dto = validRequest();
+        dto.setOwnerUsername("a".repeat(255));
+        assertThat(validator.validate(dto)).isEmpty();
+
+        dto.setOwnerUsername("a".repeat(256));
+        assertThat(validator.validate(dto))
+            .extracting(violation -> violation.getPropertyPath().toString())
+            .containsExactly("ownerUsername");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"Обычная задача", "Tâche à réaliser", "任务 ✅", "Проверить 👩‍💻"})
     @DisplayName("Accepts Unicode names without control characters")
     void acceptsUnicodeName(String name) {
@@ -150,6 +188,7 @@ class TaskRequestDTOTest {
     private TaskRequestDTO validRequest() {
         TaskRequestDTO dto = new TaskRequestDTO();
         dto.setEventId(UUID.randomUUID());
+        dto.setOwnerUsername("alice");
         dto.setName("My task");
         dto.setDuration(1_000L);
         return dto;

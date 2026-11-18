@@ -1,5 +1,6 @@
 package com.example.taskapplication.service.execution;
 
+import com.example.taskapplication.config.WorkerTimingProperties;
 import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,6 +17,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -29,6 +31,8 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class TaskUpdateServiceTest {
 
+    private static final WorkerTimingProperties TIMING = new WorkerTimingProperties(47, 7);
+
     private static final Long TASK_ID = 7L;
     private static final UUID EXECUTION_ID = UUID.fromString("cc258051-0eba-4ede-9311-eb59eb55609a");
 
@@ -39,7 +43,7 @@ class TaskUpdateServiceTest {
 
     @BeforeEach
     void setUp() {
-        taskUpdateService = new TaskUpdateService(taskRepository);
+        taskUpdateService = new TaskUpdateService(taskRepository, TIMING);
     }
 
     @ParameterizedTest
@@ -47,14 +51,14 @@ class TaskUpdateServiceTest {
     @DisplayName("Accepts both intermediate progress boundaries and passes the execution owner")
     void updateProgressAcceptsBoundaries(int progress) {
         when(taskRepository.updateProgress(
-            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), progress
+            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), progress, TIMING.leaseSeconds()
         )).thenReturn(1);
 
         boolean updated = taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, progress);
 
         assertThat(updated).isTrue();
         verify(taskRepository).updateProgress(
-            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), progress
+            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), progress, TIMING.leaseSeconds()
         );
     }
 
@@ -62,7 +66,7 @@ class TaskUpdateServiceTest {
     @DisplayName("Returns false when the progress update affects no rows")
     void updateProgressReturnsFalseWhenNothingWasUpdated() {
         when(taskRepository.updateProgress(
-            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), 40
+            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), 40, TIMING.leaseSeconds()
         )).thenReturn(0);
 
         assertThat(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40)).isFalse();
@@ -93,23 +97,25 @@ class TaskUpdateServiceTest {
 
     @ParameterizedTest
     @CsvSource({
-        "0, 0, 1, true",
-        "42, 42, 1, true",
-        "99, 99, 1, true",
-        "100, 99, 1, true",
-        "42, 42, 0, false"
+        "0, 0, NEW",
+        "42, 42, NEW",
+        "99, 99, FAILED",
+        "100, 99, FAILED",
+        "42, 42, "
     })
-    @DisplayName("Records the failed attempt with its owner and capped progress and returns the update outcome")
+    @DisplayName("Returns the saved retry or terminal status, or no result for a stale attempt")
     void failTaskAttemptPreservesOwnerAndNormalizesProgress(
-        int progress, int expectedProgress, int updatedRows, boolean expected
+        int progress, int expectedProgress, TaskStatus expectedStatus
     ) {
-        when(taskRepository.failExecution(TASK_ID, EXECUTION_ID, expectedProgress, "Task failed"))
-            .thenReturn(updatedRows);
+        when(taskRepository.failExecution(TASK_ID, EXECUTION_ID, expectedProgress, "Task failed",
+            TIMING.retryBackoffSeconds()))
+            .thenReturn(Optional.ofNullable(expectedStatus).map(TaskStatus::name));
 
         assertThat(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, progress, "Task failed"))
-            .isEqualTo(expected);
+            .isEqualTo(Optional.ofNullable(expectedStatus));
 
-        verify(taskRepository).failExecution(TASK_ID, EXECUTION_ID, expectedProgress, "Task failed");
+        verify(taskRepository).failExecution(TASK_ID, EXECUTION_ID, expectedProgress, "Task failed",
+            TIMING.retryBackoffSeconds());
     }
 
     @ParameterizedTest

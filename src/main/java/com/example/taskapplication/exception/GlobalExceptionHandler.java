@@ -1,34 +1,41 @@
 package com.example.taskapplication.exception;
 
 import com.example.taskapplication.dto.ErrorResponse;
+import com.example.taskapplication.service.database.DatabaseFailureClassifier;
 import jakarta.validation.ConstraintViolationException;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
-import org.springframework.orm.jpa.JpaSystemException;
-import org.springframework.transaction.CannotCreateTransactionException;
-import org.springframework.transaction.TransactionSystemException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
-import java.sql.SQLException;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 @RestControllerAdvice
 @Slf4j
+@RequiredArgsConstructor
 public class GlobalExceptionHandler {
+
+    private final DatabaseFailureClassifier databaseFailureClassifier;
 
     @ExceptionHandler(TaskNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleTaskNotFound(TaskNotFoundException ex) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
             .cacheControl(CacheControl.noStore())
             .body(new ErrorResponse("TASK_NOT_FOUND", ex.getMessage()));
+    }
+
+    @ExceptionHandler(TaskRetryNotAllowedException.class)
+    public ResponseEntity<ErrorResponse> handleTaskRetryNotAllowed(TaskRetryNotAllowedException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+            .cacheControl(CacheControl.noStore())
+            .body(new ErrorResponse("TASK_NOT_RETRYABLE", ex.getMessage()));
     }
 
     @ExceptionHandler({
@@ -56,36 +63,6 @@ public class GlobalExceptionHandler {
             .body(new ErrorResponse("VALIDATION_ERROR", message));
     }
 
-    @ExceptionHandler({
-        DataAccessResourceFailureException.class,
-        CannotCreateTransactionException.class
-    })
-    public ResponseEntity<ErrorResponse> handleDatabaseUnavailable(Exception ex) {
-        log.error("Database is not available for this request", ex);
-        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-            .body(new ErrorResponse("SERVICE_UNAVAILABLE", "Service is not available right now"));
-    }
-
-    @ExceptionHandler({JpaSystemException.class, TransactionSystemException.class})
-    public ResponseEntity<ErrorResponse> handleTransactionError(Exception ex) {
-        Throwable cause = ex;
-        while (cause != null) {
-            if (cause instanceof SQLException sql
-                && sql.getSQLState() != null
-                && sql.getSQLState().startsWith("08")) {
-                return handleDatabaseUnavailable(ex);
-            }
-            if (cause instanceof org.hibernate.TransactionException transaction
-                && transaction.getCause() instanceof SQLException sql
-                && sql.getSQLState() == null
-                && "Connection is closed".equalsIgnoreCase(sql.getMessage())) {
-                return handleDatabaseUnavailable(ex);
-            }
-            cause = cause.getCause();
-        }
-        return handleUnexpected(ex);
-    }
-
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex) {
 
@@ -101,8 +78,18 @@ public class GlobalExceptionHandler {
                 .body(new ErrorResponse("HTTP_" + status.value(), message));
         }
 
+        if (databaseFailureClassifier.classify(ex) == DatabaseFailureClassifier.Action.RETRY) {
+            return handleDatabaseUnavailable(ex);
+        }
+
         log.error("Unexpected request error", ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
             .body(new ErrorResponse("INTERNAL_ERROR", "Internal server error"));
+    }
+
+    private ResponseEntity<ErrorResponse> handleDatabaseUnavailable(Exception ex) {
+        log.error("Database is not available for this request", ex);
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+            .body(new ErrorResponse("SERVICE_UNAVAILABLE", "Service is not available right now"));
     }
 }

@@ -29,11 +29,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.ConfluentKafkaContainer;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -97,6 +99,7 @@ abstract class TaskLoadSupport {
         for (int i = 0; i < count; i++) {
 
             instances.add(new SpringApplicationBuilder(TaskApplication.class)
+                .profiles("test")
                 .registerShutdownHook(false)
                 .initializers(context -> context.getBeanFactory().registerSingleton(
                     "loadTestTypeExcludeFilter", new TypeExcludeFilter() {
@@ -199,6 +202,8 @@ abstract class TaskLoadSupport {
         var context = (ServletWebServerApplicationContext) instances.get(instanceIndex);
         var request = HttpRequest.newBuilder()
             .uri(URI.create("http://localhost:" + context.getWebServer().getPort() + path))
+            .header("Authorization", "Basic " + Base64.getEncoder().encodeToString(
+                "admin:admin-test-password".getBytes(StandardCharsets.UTF_8)))
             .timeout(Duration.ofSeconds(15)).GET().build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
     }

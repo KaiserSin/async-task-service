@@ -1,8 +1,7 @@
 package com.example.taskapplication.metrics;
 
-import com.example.taskapplication.service.TaskService;
-import com.example.taskapplication.service.execution.TaskExecutionService;
-import com.example.taskapplication.service.execution.TaskStatusService;
+import com.example.taskapplication.service.execution.WorkerLifecycle;
+import com.example.taskapplication.service.maintenance.MaintenanceScheduler;
 import com.example.taskapplication.service.maintenance.TaskCleanupService;
 import com.example.taskapplication.service.maintenance.TaskRecoveryService;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -14,11 +13,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -89,21 +86,40 @@ class TaskMetricsTest {
     }
 
     @Test
-    void countsOnlyTasksReturnedToQueue() {
+    void countsCompletedAndFailedTransitionsSeparately() {
+        assertThat(registry.get("task.completed").counter().count()).isZero();
+        assertThat(registry.get("task.failed").counter().count()).isZero();
+
+        metrics.recordCompleted();
+        metrics.recordCompleted();
+        metrics.recordFailed(3);
+        metrics.recordFailed(1);
+        metrics.recordFailed(0);
+
+        assertThat(registry.get("task.completed").counter().count()).isEqualTo(2);
+        assertThat(registry.get("task.failed").counter().count()).isEqualTo(4);
+        assertThat(registry.get("task.recovered").counter().count()).isZero();
+    }
+
+    @Test
+    void countsRecoveryRetriesAndTerminalFailuresOnlyAfterSuccessfulReturn() {
         TaskRecoveryService recovery = mock(TaskRecoveryService.class);
         when(recovery.recoverExpiredTasks())
-            .thenReturn(List.of(Map.of("status", "NEW"), Map.of("status", "FAILED")))
+            .thenReturn(List.of(Map.of("status", "NEW"), Map.of("status", "FAILED"),
+                Map.of("status", "FAILED")))
             .thenThrow(new DataAccessResourceFailureException("Commit failed"));
-        TaskService service = new TaskService(
-            mock(ThreadPoolExecutor.class), mock(TaskExecutionService.class),
-            mock(TaskStatusService.class), recovery, mock(TaskCleanupService.class),
-            mock(KafkaListenerEndpointRegistry.class), metrics
+        MaintenanceScheduler scheduler = new MaintenanceScheduler(
+            mock(WorkerLifecycle.class), recovery, mock(TaskCleanupService.class), metrics
         );
 
-        service.recoverExpiredTasks();
+        scheduler.recoverExpiredTasks();
         assertThat(registry.get("task.recovered").counter().count()).isEqualTo(1);
+        assertThat(registry.get("task.failed").counter().count()).isEqualTo(2);
+        assertThat(registry.get("task.completed").counter().count()).isZero();
 
-        service.recoverExpiredTasks();
+        scheduler.recoverExpiredTasks();
         assertThat(registry.get("task.recovered").counter().count()).isEqualTo(1);
+        assertThat(registry.get("task.failed").counter().count()).isEqualTo(2);
+        assertThat(registry.get("task.completed").counter().count()).isZero();
     }
 }

@@ -11,6 +11,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -30,6 +32,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     "spring.datasource.hikari.register-mbeans=false"
 })
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 @Testcontainers
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class TaskOpenApiTest {
@@ -58,7 +61,7 @@ class TaskOpenApiTest {
             JsonNode operation = document.path("paths").path(path).path("get");
             assertThat(operation.isObject()).isTrue();
             assertThat(operation.path("summary").asText()).isNotBlank();
-            for (String code : List.of("200", "400", "404", "503", "500")) {
+            for (String code : List.of("200", "400", "401", "403", "404", "503", "500")) {
                 JsonNode response = operation.path("responses").path(code);
                 assertThat(response.path("description").asText()).isNotBlank();
                 String model = code.equals("200") ? "TaskResponseDTO" : "ErrorResponse";
@@ -66,6 +69,24 @@ class TaskOpenApiTest {
                     .path("schema").path("$ref").asText())
                     .isEqualTo("#/components/schemas/" + model);
             }
+        }
+
+        JsonNode scheme = document.path("components").path("securitySchemes").path("basicAuth");
+        assertThat(scheme.path("type").asText()).isEqualTo("http");
+        assertThat(scheme.path("scheme").asText()).isEqualTo("basic");
+        for (String path : List.of("/api/tasks/{id}", "/api/tasks/by-event-id/{eventId}")) {
+            assertThat(document.path("paths").path(path).path("get").path("security").toString())
+                .contains("basicAuth");
+        }
+        JsonNode retry = document.path("paths").path("/api/tasks/{id}/retry").path("post");
+        assertThat(retry.path("summary").asText()).isNotBlank();
+        assertThat(retry.path("security").toString()).contains("basicAuth");
+        assertThat(retry.path("responses").has("200")).isFalse();
+        assertThat(retry.path("responses").path("204").path("description").asText()).isNotBlank();
+        assertThat(retry.path("responses").path("204").path("content").isMissingNode()).isTrue();
+        for (String code : List.of("400", "401", "403", "404", "409", "503", "500")) {
+            assertThat(retry.path("responses").path(code).path("content").path("application/json")
+                .path("schema").path("$ref").asText()).isEqualTo("#/components/schemas/ErrorResponse");
         }
 
         JsonNode id = parameter(document, "/api/tasks/{id}", "id");
@@ -124,7 +145,7 @@ class TaskOpenApiTest {
     }
 
     private JsonNode getJson(String path, int expectedStatus) throws Exception {
-        MockHttpServletResponse response = mockMvc.perform(get(path).accept(MediaType.APPLICATION_JSON))
+        MockHttpServletResponse response = mockMvc.perform(get(path).with(httpBasic("admin", "admin-test-password")).accept(MediaType.APPLICATION_JSON))
             .andExpect(status().is(expectedStatus))
             .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
             .andReturn().getResponse();

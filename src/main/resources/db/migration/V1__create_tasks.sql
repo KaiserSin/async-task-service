@@ -26,4 +26,4 @@ CREATE TABLE tasks (
     )
 );
 
-CREATE INDEX idx_tasks_status_id ON tasks (status, id);
+CREATE INDEX idx_tasks_new_id ON tasks (id) WHERE status = 'NEW';

@@ -1,0 +1,9 @@
+management:
+  server:
+    address: ${MANAGEMENT_SERVER_ADDRESS:127.0.0.1}
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

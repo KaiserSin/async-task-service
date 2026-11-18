@@ -20,6 +20,8 @@ public class TaskMetrics {
     private final JdbcTemplate jdbcTemplate;
     private final Timer executionDuration;
     private final Counter recoveredTasks;
+    private final Counter completedTasks;
+    private final Counter failedTasks;
     private final Counter resultSaveErrors;
 
     private volatile double newTasks = Double.NaN;
@@ -49,12 +51,20 @@ public class TaskMetrics {
             .description("Tasks returned to the queue after lease expiry")
             .register(registry);
 
+        completedTasks = Counter.builder("task.completed")
+            .description("Tasks transitioned to COMPLETED")
+            .register(registry);
+
+        failedTasks = Counter.builder("task.failed")
+            .description("Tasks transitioned to FAILED")
+            .register(registry);
+
         resultSaveErrors = Counter.builder("task.result.save.errors")
             .description("Failed final result writes")
             .register(registry);
     }
 
-    @Scheduled(fixedDelayString = "${worker.metrics-delay-ms:5000}")
+    @Scheduled(fixedDelayString = "${worker.metrics-delay-ms:60000}")
     public void updateQueueMetrics() {
         try {
             var row = jdbcTemplate.queryForMap("""
@@ -95,6 +105,14 @@ public class TaskMetrics {
 
     public void recordRecovered(long count) {
         recoveredTasks.increment(count);
+    }
+
+    public void recordCompleted() {
+        completedTasks.increment();
+    }
+
+    public void recordFailed(long count) {
+        failedTasks.increment(count);
     }
 
     public void recordResultSaveError() {

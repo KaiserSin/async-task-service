@@ -3,15 +3,26 @@ package com.example.taskapplication.service.database;
 import jakarta.persistence.PersistenceException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.RecoverableDataAccessException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.orm.jpa.JpaSystemException;
 
+import javax.net.ssl.SSLException;
 import java.net.ConnectException;
+import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.sql.BatchUpdateException;
 import java.sql.SQLException;
 import java.sql.SQLTransientConnectionException;
+import java.sql.SQLRecoverableException;
+import java.sql.SQLTimeoutException;
+import java.util.stream.Stream;
 
 import static com.example.taskapplication.service.database.DatabaseFailureClassifier.Action.NOT_DATABASE;
 import static com.example.taskapplication.service.database.DatabaseFailureClassifier.Action.RECOVER;
@@ -41,7 +52,11 @@ class DatabaseFailureClassifierTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"08003", "08006", "08007", "40001", "40P01", "53300", "55P03", "57014", "57P01", "57P02", "57P03"})
+    @ValueSource(strings = {
+        "08000", "08001", "08003", "08004", "08006", "08007", "08P01",
+        "25006", "40001", "40P01", "53000", "53100", "53200", "53300", "53400",
+        "55P03", "57014", "57P01", "57P02", "57P03", "57P04", "57P05", "58000", "58030", "58P01"
+    })
     void retriesTemporaryDatabaseFailures(String sqlState) {
         assertThat(classifier.classify(new SQLException("Temporary failure", sqlState)))
             .isEqualTo(RETRY);
@@ -55,10 +70,68 @@ class DatabaseFailureClassifierTest {
 
     @ParameterizedTest
     @NullAndEmptySource
-    @ValueSource(strings = {" ", "08001", "28P01", "42501", "42601", "42P01", "XX000"})
+    @ValueSource(strings = {" ", "2", "28000", "28P01", "3D000", "3F000", "42501", "42601", "42P01", "0A000", "F0000", "XX000"})
     void stopsForUnknownOrPermanentDatabaseFailures(String sqlState) {
         assertThat(classifier.classify(new SQLException("Database failure", sqlState)))
             .isEqualTo(STOP);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Connection is closed", "JDBC connection unavailable", "Unrelated driver wording"})
+    void retriesJdbcTransactionFailuresWithoutDependingOnMessage(String message) {
+        var failure = new JpaSystemException(new org.hibernate.TransactionException(
+            "Rollback failed", new SQLException(message)));
+
+        assertThat(classifier.classify(failure)).isEqualTo(RETRY);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "\t"})
+    void retriesJdbcTransactionFailuresWithNoUsableSqlState(String sqlState) {
+        var failure = new JpaSystemException(new org.hibernate.TransactionException(
+            "Transaction failed", new SQLException("Driver detail", sqlState)));
+
+        assertThat(classifier.classify(failure)).isEqualTo(RETRY);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"22021", "23505"})
+    void jdbcTransactionWrapperDoesNotOverrideDataError(String sqlState) {
+        var failure = new JpaSystemException(new org.hibernate.TransactionException(
+            "Transaction failed", new SQLException("Invalid data", sqlState)));
+
+        assertThat(classifier.classify(failure)).isEqualTo(RECOVER);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"28P01", "42P01", "2", "XX000"})
+    void jdbcTransactionWrapperDoesNotOverridePermanentOrUnknownSqlState(String sqlState) {
+        var failure = new JpaSystemException(new org.hibernate.TransactionException(
+            "Transaction failed", new SQLException("Permanent SQL failure", sqlState)));
+
+        assertThat(classifier.classify(failure)).isEqualTo(STOP);
+    }
+
+    @Test
+    void connectionIsClosedMessageAloneDoesNotMakeSqlFailureRetryable() {
+        assertThat(classifier.classify(new SQLException("Connection is closed"))).isEqualTo(STOP);
+    }
+
+    @Test
+    void hibernateTransactionFailureWithoutJdbcCauseIsNotRetried() {
+        var failure = new JpaSystemException(new org.hibernate.TransactionException(
+            "Transaction failed", new IllegalStateException("Connection is closed")));
+
+        assertThat(classifier.classify(failure)).isEqualTo(STOP);
+    }
+
+    @Test
+    void hibernateTransactionFailureWithIndirectJdbcCauseDoesNotUseJdbcFallback() {
+        var failure = new JpaSystemException(new org.hibernate.TransactionException(
+            "Transaction failed", new IllegalStateException("Driver wrapper", new SQLException("Driver detail"))));
+
+        assertThat(classifier.classify(failure)).isEqualTo(STOP);
     }
 
     @Test
@@ -95,10 +168,41 @@ class DatabaseFailureClassifierTest {
         assertThat(classifier.classify(infrastructureFirst)).isEqualTo(expected);
     }
 
+    @ParameterizedTest
+    @MethodSource("connectionFailures")
+    void connectionFailureTakesPrecedenceOverDataError(Throwable connectionFailure) {
+        assertThat(classifier.classify(new SQLException("Invalid data", "22021", connectionFailure)))
+            .isEqualTo(RETRY);
+    }
+
+    private static Stream<Throwable> connectionFailures() {
+        return Stream.of(new ConnectException(), new SocketTimeoutException(),
+            new UnknownHostException(), new SSLException("TLS handshake failed"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("infrastructureFailuresWithoutSqlState")
+    void retriesInfrastructureFailuresWithoutSqlState(Throwable failure) {
+        assertThat(classifier.classify(failure)).isEqualTo(RETRY);
+    }
+
+    private static Stream<Throwable> infrastructureFailuresWithoutSqlState() {
+        return Stream.of(
+            new DataAccessResourceFailureException("Database unavailable"),
+            new CannotCreateTransactionException("Database unavailable"),
+            new RecoverableDataAccessException("Connection unavailable"),
+            new QueryTimeoutException("Database timeout"),
+            new SQLRecoverableException("Connection unavailable"),
+            new SQLTimeoutException("Database timeout")
+        );
+    }
+
     @Test
-    void invalidConnectionSettingsStillStopListener() {
-        assertThat(classifier.classify(new SQLException("Invalid data", "22021", new UnknownHostException())))
-            .isEqualTo(STOP);
+    void permanentSqlStateTakesPrecedenceOverTransientWrapper() {
+        var failure = new DataAccessResourceFailureException("Database unavailable",
+            new SQLException("Invalid password", "28P01", new ConnectException()));
+
+        assertThat(classifier.classify(failure)).isEqualTo(STOP);
     }
 
     @Test

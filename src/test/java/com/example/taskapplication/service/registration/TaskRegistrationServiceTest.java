@@ -38,12 +38,12 @@ class TaskRegistrationServiceTest {
     @DisplayName("Strips surrounding whitespace and registers a new task without a duplicate lookup")
     void registersNewTaskWithNormalizedName() {
         TaskRequestDTO dto = request("  My task  ");
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L))
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
             .thenReturn(1);
 
         taskRegistrationService.register(dto);
 
-        verify(taskRepository).insertIfAbsent(dto.getEventId(), "My task", 1_000L);
+        verify(taskRepository).insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername());
         verify(taskRepository, never()).findByEventId(any());
     }
 
@@ -51,12 +51,12 @@ class TaskRegistrationServiceTest {
     @DisplayName("Preserves spaces inside the name")
     void preservesSpacesInsideName() {
         TaskRequestDTO dto = request("  My  task  ");
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My  task", 1_000L))
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My  task", 1_000L, dto.getOwnerUsername()))
             .thenReturn(1);
 
         taskRegistrationService.register(dto);
 
-        verify(taskRepository).insertIfAbsent(dto.getEventId(), "My  task", 1_000L);
+        verify(taskRepository).insertIfAbsent(dto.getEventId(), "My  task", 1_000L, dto.getOwnerUsername());
     }
 
     @Test
@@ -64,7 +64,7 @@ class TaskRegistrationServiceTest {
     void acceptsIdenticalDuplicate() {
         TaskRequestDTO dto = request("  My task  ");
         Task existing = existingTask(dto);
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L))
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
             .thenReturn(0);
         when(taskRepository.findByEventId(dto.getEventId()))
             .thenReturn(Optional.of(existing));
@@ -81,7 +81,7 @@ class TaskRegistrationServiceTest {
         TaskRequestDTO dto = request("My task");
         Task existing = existingTask(dto);
         existing.setName("Another task");
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L))
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
             .thenReturn(0);
         when(taskRepository.findByEventId(dto.getEventId()))
             .thenReturn(Optional.of(existing));
@@ -96,7 +96,7 @@ class TaskRegistrationServiceTest {
         TaskRequestDTO dto = request("My task");
         Task existing = existingTask(dto);
         existing.setDuration(2_000L);
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L))
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
             .thenReturn(0);
         when(taskRepository.findByEventId(dto.getEventId()))
             .thenReturn(Optional.of(existing));
@@ -106,10 +106,51 @@ class TaskRegistrationServiceTest {
     }
 
     @Test
+    @DisplayName("A duplicate event cannot change the task owner")
+    void rejectsDuplicateWithDifferentOwner() {
+        TaskRequestDTO dto = request("My task");
+        Task existing = existingTask(dto);
+        existing.setOwnerUsername("bob");
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, "alice"))
+            .thenReturn(0);
+        when(taskRepository.findByEventId(dto.getEventId())).thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> taskRegistrationService.register(dto))
+            .isInstanceOf(InvalidTaskMessageException.class);
+    }
+
+    @Test
+    @DisplayName("A new message cannot claim ownership of a legacy task")
+    void rejectsDuplicateOfUnownedLegacyTask() {
+        TaskRequestDTO dto = request("My task");
+        Task existing = existingTask(dto);
+        existing.setOwnerUsername(null);
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, "alice"))
+            .thenReturn(0);
+        when(taskRepository.findByEventId(dto.getEventId())).thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> taskRegistrationService.register(dto))
+            .isInstanceOf(InvalidTaskMessageException.class);
+    }
+
+    @Test
+    @DisplayName("Preserves the exact owner identity without stripping or changing case")
+    void preservesExactOwnerIdentity() {
+        TaskRequestDTO dto = request("My task");
+        dto.setOwnerUsername(" Alice ");
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, " Alice "))
+            .thenReturn(1);
+
+        taskRegistrationService.register(dto);
+
+        verify(taskRepository).insertIfAbsent(dto.getEventId(), "My task", 1_000L, " Alice ");
+    }
+
+    @Test
     @DisplayName("Reports an error when the event record is missing after a conflict")
     void rejectsMissingTaskAfterInsertConflict() {
         TaskRequestDTO dto = request("My task");
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L))
+        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
             .thenReturn(0);
         when(taskRepository.findByEventId(dto.getEventId()))
             .thenReturn(Optional.empty());
@@ -121,6 +162,7 @@ class TaskRegistrationServiceTest {
     private TaskRequestDTO request(String name) {
         TaskRequestDTO dto = new TaskRequestDTO();
         dto.setEventId(UUID.randomUUID());
+        dto.setOwnerUsername("alice");
         dto.setName(name);
         dto.setDuration(1_000L);
         return dto;
@@ -129,6 +171,7 @@ class TaskRegistrationServiceTest {
     private Task existingTask(TaskRequestDTO dto) {
         Task task = new Task();
         task.setEventId(dto.getEventId());
+        task.setOwnerUsername(dto.getOwnerUsername());
         task.setName(dto.getName().strip());
         task.setDuration(dto.getDuration());
         return task;

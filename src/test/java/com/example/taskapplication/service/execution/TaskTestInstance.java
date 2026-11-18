@@ -3,12 +3,14 @@ package com.example.taskapplication.service.execution;
 import com.example.taskapplication.TaskApplication;
 import com.example.taskapplication.config.TransactionConfig;
 import com.example.taskapplication.config.WorkerConfig;
+import com.example.taskapplication.config.WorkerTimingProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.metrics.TaskMetrics;
 import com.example.taskapplication.model.Task;
 import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
-import com.example.taskapplication.service.TaskService;
+import com.example.taskapplication.service.TaskPoller;
+import com.example.taskapplication.service.maintenance.MaintenanceScheduler;
 import com.example.taskapplication.service.maintenance.TaskCleanupService;
 import com.example.taskapplication.service.maintenance.TaskRecoveryService;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,6 +21,7 @@ import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.context.TypeExcludeFilter;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.TestComponent;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.ApplicationListener;
@@ -47,6 +50,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.awaitility.Awaitility.await;
 
@@ -62,7 +66,7 @@ public class TaskTestInstance {
 
         SpringApplicationBuilder application = new SpringApplicationBuilder(
             shutdown ? TaskApplication.class : Config.class
-        );
+        ).profiles("test");
         if (shutdown) {
             application.sources(Shutdown.class).initializers(context ->
                 context.getBeanFactory().registerSingleton("shutdownTestTypeExcludeFilter", new TypeExcludeFilter() {
@@ -87,7 +91,7 @@ public class TaskTestInstance {
             "--spring.main.banner-mode=off",
             "--spring.main.log-startup-info=false",
             "--logging.level.root=WARN",
-            "--logging.level.com.example.taskapplication.service.TaskService=" + (shutdown ? "INFO" : "WARN"),
+            "--logging.level.com.example.taskapplication.service.execution.WorkerLifecycle=" + (shutdown ? "INFO" : "WARN"),
             "--logging.level.org.hibernate.SQL=OFF",
             "--test.mode=" + mode,
             "--test.worker=" + worker,
@@ -173,6 +177,7 @@ public class TaskTestInstance {
 
     @TestConfiguration(proxyBeanMethods = false)
     @EnableAutoConfiguration(exclude = KafkaAutoConfiguration.class)
+    @EnableConfigurationProperties(WorkerTimingProperties.class)
     @EntityScan(basePackageClasses = Task.class)
     @EnableJpaRepositories(basePackageClasses = TaskRepository.class)
     @Import({TaskClaimService.class, TaskUpdateService.class, TaskRecoveryService.class, TaskMetrics.class, Worker.class})
@@ -209,17 +214,32 @@ public class TaskTestInstance {
         TaskStatusService taskStatusService(
             TaskUpdateService updates,
             TaskMetrics taskMetrics,
+            WorkerTimingProperties timingProperties,
             JdbcTemplate jdbcTemplate,
             @Value("${test.mode}") String mode
         ) {
-            return new TaskStatusService(updates, taskMetrics) {
-                private TaskRun currentRun;
-                private int steps;
-
+            DemoTaskHandler demo = new DemoTaskHandler();
+            TaskHandler handler = (run, elapsedMillis, stepMillis) -> {
+                if (mode.equals("duringWork") && elapsedMillis == 1000L) {
+                    signal("WORKING", run);
+                    awaitContinue();
+                }
+                demo.handleStep(run, elapsedMillis, stepMillis);
+                if (mode.equals("afterEffect") || mode.equals("effectWorker")) {
+                    jdbcTemplate.update("INSERT INTO test_calls (task_id) VALUES (?)", run.id());
+                    jdbcTemplate.update("""
+                        INSERT INTO test_effects (task_id) VALUES (?)
+                        ON CONFLICT (task_id) DO NOTHING
+                        """, run.id());
+                    if (mode.equals("afterEffect")) {
+                        signal("EFFECT_DONE", run);
+                        awaitContinue();
+                    }
+                }
+            };
+            return new TaskStatusService(updates, taskMetrics, handler, timingProperties) {
                 @Override
                 public void executeTask(TaskRun run) {
-                    currentRun = run;
-                    steps = 0;
                     signal("CLAIMED", run);
                     if (mode.equals("hold")) {
                         if (!updates.updateProgress(run.id(), run.executionId(), 40)) {
@@ -231,29 +251,6 @@ public class TaskTestInstance {
                     super.executeTask(run);
                     signal("DONE", run);
                 }
-
-                @Override
-                void performStep(long millis) throws InterruptedException {
-                    steps++;
-                    if (mode.equals("duringWork") && steps == 2) {
-
-                        signal("WORKING", currentRun);
-                        awaitContinue();
-                    }
-                    super.performStep(millis);
-                    if (mode.equals("afterEffect") || mode.equals("effectWorker")) {
-
-                        jdbcTemplate.update("INSERT INTO test_calls (task_id) VALUES (?)", currentRun.id());
-                        jdbcTemplate.update("""
-                            INSERT INTO test_effects (task_id) VALUES (?)
-                            ON CONFLICT (task_id) DO NOTHING
-                            """, currentRun.id());
-                        if (mode.equals("afterEffect")) {
-                            signal("EFFECT_DONE", currentRun);
-                            awaitContinue();
-                        }
-                    }
-                }
             };
         }
     }
@@ -261,7 +258,8 @@ public class TaskTestInstance {
     @TestConfiguration(proxyBeanMethods = false)
     @ConditionalOnProperty(name = "test.worker", havingValue = "true")
     @EnableScheduling
-    @Import({WorkerConfig.class, TaskService.class, TaskExecutionService.class, TaskCleanupService.class})
+    @Import({WorkerConfig.class, TaskPoller.class, MaintenanceScheduler.class, WorkerLifecycle.class,
+        TaskExecutionService.class, TaskCleanupService.class})
     static class Worker {
 
         @Bean
@@ -279,29 +277,25 @@ public class TaskTestInstance {
         TaskStatusService shutdownTaskStatusService(
             TaskUpdateService updates,
             TaskMetrics metrics,
+            WorkerTimingProperties timingProperties,
             @Value("${test.mode}") String mode
         ) {
-            return new TaskStatusService(updates, metrics) {
-                private TaskRun currentRun;
-                private boolean started;
-
+            AtomicBoolean started = new AtomicBoolean();
+            DemoTaskHandler demo = new DemoTaskHandler();
+            TaskHandler handler = (run, elapsedMillis, stepMillis) -> {
+                if (started.compareAndSet(false, true)) {
+                    signal("WORKING", run);
+                    if (mode.equals("shutdown")) {
+                        awaitContinue();
+                    }
+                }
+                demo.handleStep(run, elapsedMillis, stepMillis);
+            };
+            return new TaskStatusService(updates, metrics, handler, timingProperties) {
                 @Override
                 public void executeTask(TaskRun run) {
-                    currentRun = run;
                     super.executeTask(run);
                     signal("DONE", run);
-                }
-
-                @Override
-                void performStep(long millis) throws InterruptedException {
-                    if (!started) {
-                        started = true;
-                        signal("WORKING", currentRun);
-                        if (mode.equals("shutdown")) {
-                            awaitContinue();
-                        }
-                    }
-                    super.performStep(millis);
                 }
             };
         }

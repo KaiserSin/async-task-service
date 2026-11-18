@@ -2,5 +2,6 @@ package com.example.taskapplication.dto;
 
 import java.util.UUID;
 
-public record TaskRun(Long id, UUID executionId, long duration) {
+// The monotonic lease deadline is local to the process that claimed this run.
+public record TaskRun(Long id, UUID eventId, UUID executionId, long duration, long leaseDeadlineNanos) {
 }

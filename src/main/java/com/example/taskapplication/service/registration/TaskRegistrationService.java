@@ -8,6 +8,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Objects;
+
 @Service
 @RequiredArgsConstructor
 public class TaskRegistrationService {
@@ -18,7 +20,7 @@ public class TaskRegistrationService {
     public void register(TaskRequestDTO dto) {
         String normalizedName = dto.getName().strip();
         int inserted = taskRepository.insertIfAbsent(
-            dto.getEventId(), normalizedName, dto.getDuration()
+            dto.getEventId(), normalizedName, dto.getDuration(), dto.getOwnerUsername()
         );
 
         if (inserted == 0) {
@@ -26,7 +28,8 @@ public class TaskRegistrationService {
                 .orElseThrow(() -> new IllegalStateException("Event was not found"));
 
             if (!existing.getName().equals(normalizedName)
-                || !existing.getDuration().equals(dto.getDuration())) {
+                || !existing.getDuration().equals(dto.getDuration())
+                || !Objects.equals(existing.getOwnerUsername(), dto.getOwnerUsername())) {
                 throw new InvalidTaskMessageException(
                     "eventId is already used with different values"
                 );

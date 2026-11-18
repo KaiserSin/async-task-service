@@ -1,10 +1,14 @@
 package com.example.taskapplication.controller;
 
+import com.example.taskapplication.config.SecurityConfig;
 import com.example.taskapplication.exception.GlobalExceptionHandler;
 import com.example.taskapplication.model.Task;
 import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
+import com.example.taskapplication.service.database.DatabaseFailureClassifier;
 import com.example.taskapplication.service.query.TaskQueryService;
+import com.example.taskapplication.service.maintenance.TaskRetryService;
+import com.example.taskapplication.service.security.TaskAccessService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,8 +23,9 @@ import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.context.TestComponent;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
@@ -29,6 +34,7 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.orm.jpa.JpaSystemException;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.CannotCreateTransactionException;
@@ -38,6 +44,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.sql.SQLException;
+import java.sql.SQLRecoverableException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -47,6 +54,8 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.Mockito.doThrow;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -57,6 +66,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
     "spring.datasource.hikari.register-mbeans=false"
 })
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 @Testcontainers
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class TaskApiTest {
@@ -157,7 +167,7 @@ class TaskApiTest {
     @DisplayName("Connection failure during rollback returns 503")
     void handlesRollbackError() throws Exception {
         doThrow(new JpaSystemException(new org.hibernate.TransactionException(
-            "Unable to rollback against JDBC Connection", new SQLException("Connection is closed")
+            "Unable to rollback against JDBC Connection", new SQLRecoverableException("Sensitive recoverable connection failure")
         ))).when(taskQueryService).findById(1L);
         doThrow(new TransactionSystemException("Sensitive detail about rollback",
             new SQLException("Sensitive detail about the connection", "08006")))
@@ -166,6 +176,84 @@ class TaskApiTest {
         for (String path : List.of("/api/tasks/1", "/api/tasks/by-event-id/" + EVENT_ID)) {
             assertError(getJson(path, 503), "SERVICE_UNAVAILABLE", "Service is not available right now");
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"25006", "40001", "53300", "57P01"})
+    @DisplayName("Shared retryable database classification maps JPA and transaction failures to 503")
+    void handlesRetryableDatabaseStates(String sqlState) throws Exception {
+        doThrow(new JpaSystemException(new org.hibernate.exception.GenericJDBCException(
+            "Sensitive JDBC detail", new SQLException("Sensitive database detail", sqlState))))
+            .when(taskQueryService).findById(1L);
+        doThrow(new TransactionSystemException("Sensitive transaction detail",
+            new SQLException("Sensitive database detail", sqlState)))
+            .when(taskQueryService).findByEventId(EVENT_ID);
+
+        for (String path : List.of("/api/tasks/1", "/api/tasks/by-event-id/" + EVENT_ID)) {
+            assertError(getJson(path, 503), "SERVICE_UNAVAILABLE", "Service is not available right now");
+        }
+    }
+
+    @Test
+    @DisplayName("A retryable next SQLException is found through a generic application wrapper")
+    void handlesConnectionFailureInNextSqlException() throws Exception {
+        SQLException failure = new SQLException("Sensitive first SQL detail");
+        failure.setNextException(new SQLException("Sensitive connection detail", "08006"));
+        doThrow(new IllegalStateException("Sensitive application wrapper", failure))
+            .when(taskQueryService).findById(1L);
+
+        assertError(getJson("/api/tasks/1", 503), "SERVICE_UNAVAILABLE", "Service is not available right now");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"28P01", "42P01"})
+    @DisplayName("Permanent SQL errors remain 500 even inside unavailable-resource wrappers")
+    void doesNotTreatPermanentDatabaseFailuresAsTemporary(String sqlState) throws Exception {
+        doThrow(new CannotCreateTransactionException("Sensitive transaction detail",
+            new SQLException("Sensitive permanent SQL detail", sqlState)))
+            .when(taskQueryService).findById(1L);
+        doThrow(new DataAccessResourceFailureException("Sensitive resource detail",
+            new SQLException("Sensitive permanent SQL detail", sqlState)))
+            .when(taskQueryService).findByEventId(EVENT_ID);
+
+        for (String path : List.of("/api/tasks/1", "/api/tasks/by-event-id/" + EVENT_ID)) {
+            assertError(getJson(path, 500), "INTERNAL_ERROR", "Internal server error");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"22021", "23505"})
+    @DisplayName("Database data errors are not mislabeled as temporary API unavailability")
+    void doesNotTreatDatabaseDataFailuresAsTemporary(String sqlState) throws Exception {
+        doThrow(new JpaSystemException(new org.hibernate.exception.GenericJDBCException(
+            "Sensitive JDBC detail", new SQLException("Sensitive data error detail", sqlState))))
+            .when(taskQueryService).findById(1L);
+
+        assertError(getJson("/api/tasks/1", 500), "INTERNAL_ERROR", "Internal server error");
+    }
+
+    @Test
+    @DisplayName("Connection-is-closed text alone does not determine database availability")
+    void doesNotClassifyFailuresByTheirMessage() throws Exception {
+        doThrow(new JpaSystemException(new org.hibernate.exception.GenericJDBCException(
+            "Sensitive JDBC detail", new SQLException("Connection is closed")
+        ))).when(taskQueryService).findById(1L);
+        doThrow(new IllegalStateException("Connection is closed"))
+            .when(taskQueryService).findByEventId(EVENT_ID);
+
+        for (String path : List.of("/api/tasks/1", "/api/tasks/by-event-id/" + EVENT_ID)) {
+            assertError(getJson(path, 500), "INTERNAL_ERROR", "Internal server error");
+        }
+    }
+
+    @Test
+    @DisplayName("A JDBC transaction failure without SQLState returns 503 independently of its message")
+    void handlesJdbcTransactionFailureWithoutSqlState() throws Exception {
+        doThrow(new JpaSystemException(new org.hibernate.TransactionException(
+            "Sensitive transaction detail", new SQLException("Arbitrary JDBC rollback failure")
+        ))).when(taskQueryService).findById(1L);
+
+        assertError(getJson("/api/tasks/1", 503), "SERVICE_UNAVAILABLE", "Service is not available right now");
     }
 
     @Test
@@ -185,7 +273,7 @@ class TaskApiTest {
     @Test
     @DisplayName("Handler preserves the standard 405 status and Allow header")
     void keepsHttpStatus() throws Exception {
-        MockHttpServletResponse response = mockMvc.perform(post("/api/tasks/1"))
+        MockHttpServletResponse response = mockMvc.perform(post("/api/tasks/1").with(httpBasic("admin", "admin-test-password")).with(csrf()))
             .andExpect(status().isMethodNotAllowed())
             .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
             .andReturn().getResponse();
@@ -214,7 +302,7 @@ class TaskApiTest {
     }
 
     private JsonNode getJson(String path, int expectedStatus) throws Exception {
-        MockHttpServletResponse response = mockMvc.perform(get(path).accept(MediaType.APPLICATION_JSON))
+        MockHttpServletResponse response = mockMvc.perform(get(path).with(httpBasic("admin", "admin-test-password")).accept(MediaType.APPLICATION_JSON))
             .andExpect(status().is(expectedStatus))
             .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
             .andReturn().getResponse();
@@ -260,11 +348,13 @@ class TaskApiTest {
         return fields;
     }
 
-    @TestConfiguration(proxyBeanMethods = false)
+    @Configuration(proxyBeanMethods = false)
+    @TestComponent
     @EnableAutoConfiguration(exclude = KafkaAutoConfiguration.class)
     @EntityScan(basePackageClasses = Task.class)
     @EnableJpaRepositories(basePackageClasses = TaskRepository.class)
-    @Import({TaskController.class, GlobalExceptionHandler.class, TaskQueryService.class})
+    @Import({TaskController.class, CsrfController.class, GlobalExceptionHandler.class, TaskQueryService.class,
+        TaskRetryService.class, TaskAccessService.class, SecurityConfig.class, DatabaseFailureClassifier.class})
     static class Config {
     }
 }
@@ -278,6 +368,7 @@ class TaskApiTest {
     "spring.datasource.hikari.data-source-properties.socketTimeout=1"
 })
 @AutoConfigureMockMvc
+@ActiveProfiles("test")
 @Testcontainers
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class TaskDatabaseTest {
@@ -300,12 +391,12 @@ class TaskDatabaseTest {
     void losesDatabase() throws Exception {
         Task task = taskRepository.saveAndFlush(TaskApiTest.task(TaskStatus.NEW));
         String path = "/api/tasks/" + task.getId();
-        mockMvc.perform(get(path)).andExpect(status().isOk());
+        mockMvc.perform(get(path).with(httpBasic("admin", "admin-test-password"))).andExpect(status().isOk());
 
         postgres.stop();
 
         assertTimeoutPreemptively(Duration.ofSeconds(15), () -> {
-            MockHttpServletResponse response = mockMvc.perform(get(path))
+            MockHttpServletResponse response = mockMvc.perform(get(path).with(httpBasic("admin", "admin-test-password")))
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andReturn().getResponse();

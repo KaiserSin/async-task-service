@@ -1,0 +1,17 @@
+api:
+  security:
+    users:
+      - username: alice
+        password: alice-test-password
+        roles: [USER]
+      - username: bob
+        password: bob-test-password
+        roles: [USER]
+      - username: admin
+        password: admin-test-password
+        roles: [ADMIN]
+
+# MockMvc tests share the application context and do not open a management socket.
+management:
+  server:
+    port:

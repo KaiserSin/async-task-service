@@ -13,14 +13,21 @@ services:
       kafka-init:
         condition: service_completed_successfully
     environment:
+      SPRING_PROFILES_ACTIVE: "${SPRING_PROFILES_ACTIVE:-prod}"
+      MANAGEMENT_SERVER_PORT: "9091"
+      MANAGEMENT_SERVER_ADDRESS: "0.0.0.0"
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/taskdb
       SPRING_DATASOURCE_USERNAME: user
-      SPRING_DATASOURCE_PASSWORD: "${POSTGRES_PASSWORD:-password}"
+      SPRING_DATASOURCE_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       WORKER_POOL_SIZE: "4"
       KAFKA_TOPIC: tasks
+      TASK_API_USERNAME: "${TASK_API_USERNAME:-user}"
+      TASK_API_PASSWORD: "${TASK_API_PASSWORD:?Set TASK_API_PASSWORD}"
+      TASK_API_ADMIN_USERNAME: "${TASK_API_ADMIN_USERNAME:-admin}"
+      TASK_API_ADMIN_PASSWORD: "${TASK_API_ADMIN_PASSWORD:?Set TASK_API_ADMIN_PASSWORD}"
     ports:
-      - "8080"
+      - "127.0.0.1::8080"
     networks:
       - app-network
     restart: unless-stopped
@@ -31,7 +38,7 @@ services:
     environment:
       POSTGRES_DB: taskdb
       POSTGRES_USER: user
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-password}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:

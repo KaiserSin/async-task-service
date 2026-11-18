@@ -1,5 +1,6 @@
 package com.example.taskapplication.service.execution;
 
+import com.example.taskapplication.config.WorkerTimingProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.metrics.TaskMetrics;
 import com.example.taskapplication.model.TaskStatus;
@@ -9,6 +10,8 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.TransactionException;
 
+import java.util.concurrent.TimeUnit;
+
 @Service
 @Slf4j
 @RequiredArgsConstructor
@@ -16,6 +19,8 @@ public class TaskStatusService {
 
     private final TaskUpdateService taskUpdateService;
     private final TaskMetrics taskMetrics;
+    private final TaskHandler taskHandler;
+    private final WorkerTimingProperties workerTiming;
 
     public void executeTask(TaskRun run) {
         long startedAt = System.nanoTime();
@@ -29,23 +34,40 @@ public class TaskStatusService {
     private void executeTaskBody(TaskRun run) {
         long elapsed = 0;
         int progress = 0;
+        long leaseDeadline = run.leaseDeadlineNanos();
 
         try {
             while (elapsed < run.duration()) {
-                long step = Math.min(1000L, run.duration() - elapsed);
-                performStep(step);
+                long remainingLeaseMillis = TimeUnit.NANOSECONDS.toMillis(leaseDeadline - nanoTime());
+                if (remainingLeaseMillis <= 0) {
+                    logExpiredLease(run);
+                    return;
+                }
+                long step = Math.min(Math.min(1000L, run.duration() - elapsed), remainingLeaseMillis);
+                taskHandler.handleStep(run, elapsed, step);
                 elapsed += step;
                 progress = Math.min(
                     99, (int) ((double) elapsed / run.duration() * 100)
                 );
 
-                if (elapsed < run.duration()
-                    && !taskUpdateService.updateProgress(
-                        run.id(), run.executionId(), progress
-                    )) {
-                    log.warn("Attempt {} of task {} is no longer active",
-                        run.executionId(), run.id());
+                if (leaseDeadline - nanoTime() <= 0) {
+                    logExpiredLease(run);
                     return;
+                }
+                if (elapsed < run.duration()) {
+                    // Count SQL and commit time against the renewed lease as well.
+                    long heartbeatStartedAt = nanoTime();
+                    try {
+                        if (!taskUpdateService.updateProgress(run.id(), run.executionId(), progress)) {
+                            log.warn("Attempt {} of task {} is no longer active",
+                                run.executionId(), run.id());
+                            return;
+                        }
+                        leaseDeadline = heartbeatStartedAt + workerTiming.leaseNanos();
+                    } catch (DataAccessException | TransactionException e) {
+                        log.warn("Could not renew lease for attempt {} of task {}; continuing within its confirmed lease",
+                            run.executionId(), run.id(), e);
+                    }
                 }
             }
         } catch (InterruptedException e) {
@@ -63,29 +85,36 @@ public class TaskStatusService {
                 Thread.currentThread().interrupt();
             }
             return;
-        } catch (DataAccessException | TransactionException e) {
-
-            log.error("Could not save progress for task {}",
-                run.id(), e);
-            return;
         } catch (RuntimeException e) {
             log.error("Attempt {} of task {} failed", run.executionId(), run.id(), e);
             saveAttemptFailure(run, progress);
             return;
         }
 
+        if (leaseDeadline - nanoTime() <= 0) {
+            logExpiredLease(run);
+            return;
+        }
         saveFinal(run, TaskStatus.COMPLETED, 100, "Task completed");
     }
 
-    void performStep(long millis) throws InterruptedException {
-        Thread.sleep(millis);
+    long nanoTime() {
+        return System.nanoTime();
+    }
+
+    private void logExpiredLease(TaskRun run) {
+        log.warn("Confirmed lease expired for attempt {} of task {}; stopping work",
+            run.executionId(), run.id());
     }
 
     private void saveAttemptFailure(TaskRun run, int progress) {
         try {
-            if (!taskUpdateService.failTaskAttempt(run.id(), run.executionId(), progress, "Task failed")) {
+            var status = taskUpdateService.failTaskAttempt(run.id(), run.executionId(), progress, "Task failed");
+            if (status.isEmpty()) {
                 log.warn("Ignored failure from old attempt {} of task {}",
                     run.executionId(), run.id());
+            } else if (status.get() == TaskStatus.FAILED) {
+                taskMetrics.recordFailed(1);
             }
         } catch (RuntimeException e) {
             taskMetrics.recordResultSaveError();
@@ -103,6 +132,10 @@ public class TaskStatusService {
             if (!updated) {
                 log.warn("Ignored result from old attempt {} of task {}",
                     run.executionId(), run.id());
+            } else if (status == TaskStatus.COMPLETED) {
+                taskMetrics.recordCompleted();
+            } else if (status == TaskStatus.FAILED) {
+                taskMetrics.recordFailed(1);
             }
         } catch (RuntimeException e) {
             taskMetrics.recordResultSaveError();

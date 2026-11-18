@@ -16,6 +16,11 @@ public class TaskRequestDTO {
     @NotNull(message = "Event ID is required")
     private UUID eventId;
 
+    @NotBlank(message = "Task owner is required")
+    @Size(max = 255, message = "Task owner must be 255 characters or fewer")
+    @Pattern(regexp = "[^\\p{Cc}]*", message = "Task owner must not contain control characters")
+    private String ownerUsername;
+
     @NotBlank(message = "Task name is required")
     @Size(max = 255, message = "Task name must be 255 characters or fewer")
     @Pattern(regexp = "[^\\p{Cc}]*", message = "Task name must not contain control characters")

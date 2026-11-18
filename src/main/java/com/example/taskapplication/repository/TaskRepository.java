@@ -52,7 +52,7 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
         UPDATE tasks
         SET status = 'IN_PROGRESS',
             execution_id = :executionId,
-            lease_until = CURRENT_TIMESTAMP + INTERVAL '30 seconds',
+            lease_until = CURRENT_TIMESTAMP + (:leaseSeconds * INTERVAL '1 second'),
             next_retry_at = NULL,
             attempts = attempts + 1,
             started_at = CURRENT_TIMESTAMP,
@@ -67,7 +67,8 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
         """, nativeQuery = true)
     int startExecution(
         @Param("id") Long id,
-        @Param("executionId") UUID executionId
+        @Param("executionId") UUID executionId,
+        @Param("leaseSeconds") int leaseSeconds
     );
 
     Optional<Task> findByEventId(UUID eventId);
@@ -78,21 +79,22 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
 
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """
-        INSERT INTO tasks (event_id, name, duration)
-        VALUES (:eventId, :name, :duration)
+        INSERT INTO tasks (event_id, name, duration, owner_username)
+        VALUES (:eventId, :name, :duration, :ownerUsername)
         ON CONFLICT (event_id) DO NOTHING
         """, nativeQuery = true)
     int insertIfAbsent(
         @Param("eventId") UUID eventId,
         @Param("name") String name,
-        @Param("duration") long duration
+        @Param("duration") long duration,
+        @Param("ownerUsername") String ownerUsername
     );
 
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """
         UPDATE tasks
         SET progress = :progress,
-            lease_until = CURRENT_TIMESTAMP + INTERVAL '30 seconds',
+            lease_until = CURRENT_TIMESTAMP + (:leaseSeconds * INTERVAL '1 second'),
             version = version + 1
         WHERE id = :id
           AND execution_id = :executionId
@@ -104,7 +106,8 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
         @Param("id") Long id,
         @Param("executionId") UUID executionId,
         @Param("runningStatus") String runningStatus,
-        @Param("progress") int progress
+        @Param("progress") int progress,
+        @Param("leaseSeconds") int leaseSeconds
     );
 
     @Modifying(flushAutomatically = true, clearAutomatically = true)
@@ -130,47 +133,51 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
         @Param("executionId") UUID executionId
     );
 
-    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """
-        UPDATE tasks
-        SET status = CASE
-                WHEN attempts < max_attempts THEN 'NEW'
-                ELSE 'FAILED'
-            END,
-            execution_id = CASE
-                WHEN attempts < max_attempts THEN NULL
-                ELSE execution_id
-            END,
-            lease_until = NULL,
-            next_retry_at = CASE
-                WHEN attempts < max_attempts
-                    THEN CURRENT_TIMESTAMP + INTERVAL '30 seconds'
-                ELSE NULL
-            END,
-            started_at = CASE
-                WHEN attempts < max_attempts THEN NULL
-                ELSE started_at
-            END,
-            finished_at = CASE
-                WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP
-                ELSE NULL
-            END,
-            progress = CASE
-                WHEN attempts < max_attempts THEN 0
-                ELSE :progress
-            END,
-            result = :result,
-            version = version + 1
-        WHERE id = :id
-          AND execution_id = :executionId
-          AND status = 'IN_PROGRESS'
-          AND lease_until > CURRENT_TIMESTAMP
+        WITH updated AS (
+            UPDATE tasks
+            SET status = CASE
+                    WHEN attempts < max_attempts THEN 'NEW'
+                    ELSE 'FAILED'
+                END,
+                execution_id = CASE
+                    WHEN attempts < max_attempts THEN NULL
+                    ELSE execution_id
+                END,
+                lease_until = NULL,
+                next_retry_at = CASE
+                    WHEN attempts < max_attempts
+                        THEN CURRENT_TIMESTAMP + (:retryBackoffSeconds * INTERVAL '1 second')
+                    ELSE NULL
+                END,
+                started_at = CASE
+                    WHEN attempts < max_attempts THEN NULL
+                    ELSE started_at
+                END,
+                finished_at = CASE
+                    WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP
+                    ELSE NULL
+                END,
+                progress = CASE
+                    WHEN attempts < max_attempts THEN 0
+                    ELSE :progress
+                END,
+                result = :result,
+                version = version + 1
+            WHERE id = :id
+              AND execution_id = :executionId
+              AND status = 'IN_PROGRESS'
+              AND lease_until > CURRENT_TIMESTAMP
+            RETURNING status
+        )
+        SELECT status FROM updated
         """, nativeQuery = true)
-    int failExecution(
+    Optional<String> failExecution(
         @Param("id") Long id,
         @Param("executionId") UUID executionId,
         @Param("progress") int progress,
-        @Param("result") String result
+        @Param("result") String result,
+        @Param("retryBackoffSeconds") int retryBackoffSeconds
     );
 
     @Modifying(flushAutomatically = true, clearAutomatically = true)
@@ -199,13 +206,27 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     );
 
     @Modifying(flushAutomatically = true, clearAutomatically = true)
-    @Query("""
-        DELETE FROM Task t
-        WHERE t.status = :status
-          AND t.finishedAt < :cutoff
-        """)
+    @Query(value = """
+        WITH batch AS (
+            SELECT id
+            FROM tasks
+            WHERE status = :status
+              AND status IN ('COMPLETED', 'FAILED')
+              AND finished_at < :cutoff
+            ORDER BY finished_at, id
+            LIMIT :batchSize
+            FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM tasks t
+        USING batch b
+        WHERE t.id = b.id
+          AND t.status = :status
+          AND t.status IN ('COMPLETED', 'FAILED')
+          AND t.finished_at < :cutoff
+        """, nativeQuery = true)
     int deleteFinishedBefore(
-        @Param("status") TaskStatus status,
-        @Param("cutoff") Instant cutoff
+        @Param("status") String status,
+        @Param("cutoff") Instant cutoff,
+        @Param("batchSize") int batchSize
     );
 }

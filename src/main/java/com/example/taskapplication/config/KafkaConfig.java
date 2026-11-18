@@ -12,6 +12,8 @@ import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.EnableKafka;
@@ -39,13 +41,8 @@ import java.util.UUID;
 
 @Configuration
 @EnableKafka
+@EnableConfigurationProperties(KafkaProperties.class)
 public class KafkaConfig {
-
-    @Value("${spring.kafka.bootstrap-servers}")
-    private String bootstrapServers;
-
-    @Value("${spring.kafka.consumer.group-id:task-group}")
-    private String groupId;
 
     @Value("${kafka.listener.concurrency:1}")
     private int concurrency;
@@ -54,10 +51,8 @@ public class KafkaConfig {
     private long databaseRetryDelayMs;
 
     @Bean
-    public ConsumerFactory<String, TaskRequestDTO> consumerFactory() {
-        Map<String, Object> props = new HashMap<>();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+    public ConsumerFactory<String, TaskRequestDTO> consumerFactory(KafkaProperties kafkaProperties) {
+        Map<String, Object> props = kafkaProperties.buildConsumerProperties();
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
@@ -75,9 +70,8 @@ public class KafkaConfig {
     }
 
     @Bean
-    public ProducerFactory<String, Object> dltProducerFactory() {
-        Map<String, Object> props = new HashMap<>();
-        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+    public ProducerFactory<String, Object> dltProducerFactory(KafkaProperties kafkaProperties) {
+        Map<String, Object> props = kafkaProperties.buildProducerProperties();
         props.put(ProducerConfig.ACKS_CONFIG, "all");
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         props.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 5000L);
@@ -116,7 +110,7 @@ public class KafkaConfig {
             new DeadLetterPublishingRecoverer(
                 dltKafkaTemplate,
                 (record, exception) -> new TopicPartition(
-                    record.topic() + ".DLT", record.partition()
+                    record.topic() + ".DLT", -1
                 )
             );
         recoverer.setFailIfSendResultIsError(true);

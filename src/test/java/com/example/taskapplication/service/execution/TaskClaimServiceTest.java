@@ -1,5 +1,6 @@
 package com.example.taskapplication.service.execution;
 
+import com.example.taskapplication.config.WorkerTimingProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.model.Task;
 import com.example.taskapplication.repository.TaskRepository;
@@ -19,19 +20,25 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class TaskClaimServiceTest {
+
+    private static final WorkerTimingProperties TIMING = new WorkerTimingProperties(47, 7);
 
     @Mock
     private TaskRepository taskRepository;
@@ -43,13 +50,17 @@ class TaskClaimServiceTest {
     private TransactionStatus transactionStatus;
 
     private TaskClaimService taskClaimService;
+    private Runnable beforeTransaction = () -> {};
 
     @BeforeEach
     void setUp() {
         when(transactionManager.getTransaction(any(TransactionDefinition.class)))
-            .thenReturn(transactionStatus);
+            .thenAnswer(invocation -> {
+                beforeTransaction.run();
+                return transactionStatus;
+            });
         taskClaimService = new TaskClaimService(
-            taskRepository, new TransactionTemplate(transactionManager)
+            taskRepository, new TransactionTemplate(transactionManager), TIMING
         );
     }
 
@@ -61,7 +72,7 @@ class TaskClaimServiceTest {
         Optional<TaskRun> result = taskClaimService.claimNextTask();
 
         assertThat(result).isEmpty();
-        verify(taskRepository, never()).startExecution(anyLong(), any(UUID.class));
+        verify(taskRepository, never()).startExecution(anyLong(), any(UUID.class), eq(TIMING.leaseSeconds()));
     }
 
     @Test
@@ -69,15 +80,59 @@ class TaskClaimServiceTest {
     void returnsTaskRunWithClaimedExecutionId() {
         Task task = createTask();
         when(taskRepository.findAndLockFirstNewTask()).thenReturn(Optional.of(task));
-        when(taskRepository.startExecution(eq(task.getId()), any(UUID.class))).thenReturn(1);
+        when(taskRepository.startExecution(eq(task.getId()), any(UUID.class), eq(TIMING.leaseSeconds()))).thenReturn(1);
 
         TaskRun result = taskClaimService.claimNextTask().orElseThrow();
 
         ArgumentCaptor<UUID> executionId = ArgumentCaptor.forClass(UUID.class);
-        verify(taskRepository).startExecution(eq(task.getId()), executionId.capture());
+        verify(taskRepository).startExecution(eq(task.getId()), executionId.capture(), eq(TIMING.leaseSeconds()));
         assertThat(result.id()).isEqualTo(task.getId());
+        assertThat(result.eventId()).isEqualTo(task.getEventId());
         assertThat(result.duration()).isEqualTo(task.getDuration().longValue());
         assertThat(result.executionId()).isNotNull().isEqualTo(executionId.getValue());
+    }
+
+    @Test
+    @DisplayName("Retries retain the operation event ID while each attempt gets a different execution ID")
+    void preservesEventIdAcrossExecutionAttempts() {
+        Task task = createTask();
+        when(taskRepository.findAndLockFirstNewTask()).thenReturn(Optional.of(task));
+        when(taskRepository.startExecution(eq(task.getId()), any(UUID.class), eq(TIMING.leaseSeconds())))
+            .thenReturn(1);
+
+        TaskRun first = taskClaimService.claimNextTask().orElseThrow();
+        TaskRun retry = taskClaimService.claimNextTask().orElseThrow();
+
+        assertThat(first.eventId()).isEqualTo(task.getEventId());
+        assertThat(retry.eventId()).isEqualTo(first.eventId());
+        assertThat(retry.executionId()).isNotEqualTo(first.executionId());
+    }
+
+    @Test
+    @DisplayName("The confirmed lease budget includes transaction startup, claim and commit time")
+    void leaseDeadlineStartsBeforeClaimTransaction() {
+        Task task = createTask();
+        long beforeClaim = TimeUnit.SECONDS.toNanos(100);
+        AtomicLong clock = new AtomicLong(beforeClaim);
+        taskClaimService = spy(taskClaimService);
+        doAnswer(invocation -> clock.get()).when(taskClaimService).nanoTime();
+        beforeTransaction = () -> clock.addAndGet(TimeUnit.SECONDS.toNanos(2));
+        when(taskRepository.findAndLockFirstNewTask()).thenAnswer(invocation -> {
+            clock.addAndGet(TimeUnit.SECONDS.toNanos(3));
+            return Optional.of(task);
+        });
+        when(taskRepository.startExecution(eq(task.getId()), any(UUID.class), eq(TIMING.leaseSeconds())))
+            .thenReturn(1);
+        doAnswer(invocation -> {
+            clock.addAndGet(TimeUnit.SECONDS.toNanos(4));
+            return null;
+        }).when(transactionManager).commit(transactionStatus);
+
+        TaskRun result = taskClaimService.claimNextTask().orElseThrow();
+
+        assertThat(result.leaseDeadlineNanos()).isEqualTo(beforeClaim + TIMING.leaseNanos());
+        assertThat(result.leaseDeadlineNanos() - clock.get())
+            .isEqualTo(TIMING.leaseNanos() - TimeUnit.SECONDS.toNanos(9));
     }
 
     @Test
@@ -85,13 +140,13 @@ class TaskClaimServiceTest {
     void rejectsTaskWhenExecutionWasNotStarted() {
         Task task = createTask();
         when(taskRepository.findAndLockFirstNewTask()).thenReturn(Optional.of(task));
-        when(taskRepository.startExecution(eq(task.getId()), any(UUID.class))).thenReturn(0);
+        when(taskRepository.startExecution(eq(task.getId()), any(UUID.class), eq(TIMING.leaseSeconds()))).thenReturn(0);
 
         assertThatThrownBy(() -> taskClaimService.claimNextTask())
             .isInstanceOf(IllegalStateException.class);
 
         verify(taskRepository).findAndLockFirstNewTask();
-        verify(taskRepository).startExecution(eq(task.getId()), any(UUID.class));
+        verify(taskRepository).startExecution(eq(task.getId()), any(UUID.class), eq(TIMING.leaseSeconds()));
     }
 
     @Test
@@ -103,7 +158,7 @@ class TaskClaimServiceTest {
         assertThatThrownBy(() -> taskClaimService.claimNextTask()).isSameAs(failure);
 
         verify(taskRepository).findAndLockFirstNewTask();
-        verify(taskRepository, never()).startExecution(anyLong(), any(UUID.class));
+        verify(taskRepository, never()).startExecution(anyLong(), any(UUID.class), eq(TIMING.leaseSeconds()));
     }
 
     @Test
@@ -112,7 +167,7 @@ class TaskClaimServiceTest {
         Task task = createTask();
         var failure = new TransactionSystemException("Failed to commit the transaction");
         when(taskRepository.findAndLockFirstNewTask()).thenReturn(Optional.of(task));
-        when(taskRepository.startExecution(eq(task.getId()), any(UUID.class))).thenReturn(1);
+        when(taskRepository.startExecution(eq(task.getId()), any(UUID.class), eq(TIMING.leaseSeconds()))).thenReturn(1);
         doThrow(failure).when(transactionManager).commit(transactionStatus);
 
         assertThatThrownBy(() -> taskClaimService.claimNextTask()).isSameAs(failure);
@@ -121,6 +176,7 @@ class TaskClaimServiceTest {
     private Task createTask() {
         Task task = new Task();
         task.setId(1L);
+        task.setEventId(UUID.fromString("12345678-1234-4321-8765-123456789abc"));
         task.setDuration(2500L);
         return task;
     }

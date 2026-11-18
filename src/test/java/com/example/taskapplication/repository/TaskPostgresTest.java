@@ -251,9 +251,11 @@ class TaskPostgresTest {
         boolean finished = taskUpdateService.updateTaskStatus(
             oldRun.id(), oldRun.executionId(), TaskStatus.COMPLETED, 100, "Old result"
         );
+        boolean requeued = taskUpdateService.requeueInterruptedTask(oldRun.id(), oldRun.executionId());
 
         assertThat(progressUpdated).isFalse();
         assertThat(finished).isFalse();
+        assertThat(requeued).isFalse();
         assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
         assertThat(taskUpdateService.updateTaskStatus(
             newRun.id(), newRun.executionId(), TaskStatus.COMPLETED, 100, "New result"
@@ -262,6 +264,75 @@ class TaskPostgresTest {
         assertThat(saved.getStatus()).isEqualTo(TaskStatus.COMPLETED);
         assertThat(saved.getProgress()).isEqualTo(100);
         assertThat(saved.getResult()).isEqualTo("New result");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 2})
+    @DisplayName("An interruption resets execution state and preserves the retry budget, including the last attempt")
+    void requeuesInterruptedAttempt(int previousAttempts) {
+        Task task = createTask();
+        jdbcTemplate.update("UPDATE tasks SET attempts = ? WHERE id = ?", previousAttempts, task.getId());
+        TaskRun interrupted = taskClaimService.claimNextTask().orElseThrow();
+        assertThat(taskUpdateService.updateProgress(task.getId(), interrupted.executionId(), 40)).isTrue();
+        jdbcTemplate.update("UPDATE tasks SET result = 'Partial result' WHERE id = ?", task.getId());
+        Task before = findTask(task.getId());
+
+        assertThat(taskUpdateService.requeueInterruptedTask(task.getId(), interrupted.executionId())).isTrue();
+
+        Task requeued = findTask(task.getId());
+        assertThat(requeued.getStatus()).isEqualTo(TaskStatus.NEW);
+        assertThat(requeued.getAttempts()).isEqualTo(previousAttempts);
+        assertThat(requeued.getProgress()).isZero();
+        assertThat(requeued.getResult()).isNull();
+        assertThat(requeued.getExecutionId()).isNull();
+        assertThat(requeued.getLeaseUntil()).isNull();
+        assertThat(requeued.getNextRetryAt()).isNull();
+        assertThat(requeued.getStartedAt()).isNull();
+        assertThat(requeued.getFinishedAt()).isNull();
+        assertThat(requeued.getCreatedAt()).isEqualTo(before.getCreatedAt());
+        assertThat(requeued.getVersion()).isEqualTo(before.getVersion() + 1);
+        assertThat(taskUpdateService.requeueInterruptedTask(task.getId(), interrupted.executionId())).isFalse();
+        assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(requeued);
+
+        TaskRun resumed = taskClaimService.claimNextTask().orElseThrow();
+        assertThat(resumed.id()).isEqualTo(task.getId());
+        assertThat(resumed.executionId()).isNotEqualTo(interrupted.executionId());
+        assertThat(findTask(task.getId()).getAttempts()).isEqualTo(previousAttempts + 1);
+        assertThat(taskUpdateService.updateTaskStatus(
+            resumed.id(), resumed.executionId(), TaskStatus.COMPLETED, 100, "Task completed"
+        )).isTrue();
+        assertThat(findTask(task.getId()).getStatus()).isEqualTo(TaskStatus.COMPLETED);
+    }
+
+    @Test
+    @DisplayName("An interrupted attempt with an expired lease cannot bypass lease recovery")
+    void rejectsRequeueAfterLeaseExpiry() {
+        Task task = createTask();
+        TaskRun run = taskClaimService.claimNextTask().orElseThrow();
+        expireLease(task.getId());
+        Task before = findTask(task.getId());
+
+        assertThat(taskUpdateService.requeueInterruptedTask(task.getId(), run.executionId())).isFalse();
+
+        assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
+        assertThat(taskRecoveryService.recoverExpiredTasks()).hasSize(1);
+        assertThat(findTask(task.getId()).getStatus()).isEqualTo(TaskStatus.NEW);
+        assertThat(findTask(task.getId()).getAttempts()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("A late interruption cannot put a completed task back into the queue")
+    void rejectsRequeueOfCompletedTask() {
+        Task task = createTask();
+        TaskRun run = taskClaimService.claimNextTask().orElseThrow();
+        assertThat(taskUpdateService.updateTaskStatus(
+            run.id(), run.executionId(), TaskStatus.COMPLETED, 100, "Task completed"
+        )).isTrue();
+        Task before = findTask(task.getId());
+
+        assertThat(taskUpdateService.requeueInterruptedTask(task.getId(), run.executionId())).isFalse();
+
+        assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
     }
 
     @Test

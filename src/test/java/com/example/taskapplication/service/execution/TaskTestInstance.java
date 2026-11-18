@@ -42,6 +42,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -52,9 +54,9 @@ public class TaskTestInstance {
 
     public static void main(String[] args) throws Exception {
         String mode = args[0];
-        boolean shutdown = mode.equals("shutdown");
+        boolean shutdown = mode.equals("shutdown") || mode.equals("shutdownInterrupted");
         boolean worker = switch (mode) {
-            case "worker", "hold", "effectWorker", "shutdown" -> true;
+            case "worker", "hold", "effectWorker", "shutdown", "shutdownInterrupted" -> true;
             default -> false;
         };
 
@@ -72,32 +74,36 @@ public class TaskTestInstance {
             );
         }
 
+        List<String> arguments = new ArrayList<>(List.of(
+            "--spring.datasource.url=" + System.getenv("TEST_DB_URL"),
+            "--spring.datasource.username=" + System.getenv("TEST_DB_USERNAME"),
+            "--spring.datasource.password=" + System.getenv("TEST_DB_PASSWORD"),
+            "--spring.kafka.bootstrap-servers=" + System.getenv("TEST_KAFKA_BOOTSTRAP_SERVERS"),
+            "--server.port=0",
+            "--spring.datasource.hikari.maximum-pool-size=3",
+            "--spring.datasource.hikari.minimum-idle=0",
+            "--spring.datasource.hikari.register-mbeans=false",
+            "--spring.jpa.hibernate.ddl-auto=validate",
+            "--spring.main.banner-mode=off",
+            "--spring.main.log-startup-info=false",
+            "--logging.level.root=WARN",
+            "--logging.level.com.example.taskapplication.service.TaskService=" + (shutdown ? "INFO" : "WARN"),
+            "--logging.level.org.hibernate.SQL=OFF",
+            "--test.mode=" + mode,
+            "--test.worker=" + worker,
+            "--worker.pool.size=1",
+            "--worker.poll-delay-ms=100",
+            "--worker.recovery-delay-ms=100",
+            "--worker.cleanup.cron=-"
+        ));
+        if (!shutdown || mode.equals("shutdownInterrupted")) {
+            arguments.add("--worker.shutdown.grace-period-seconds=1");
+            arguments.add("--worker.shutdown.interrupt-wait-seconds=" + (shutdown ? 10 : 1));
+        }
+
         try (ConfigurableApplicationContext context = application
             .web(shutdown ? WebApplicationType.SERVLET : WebApplicationType.NONE)
-            .run(
-                "--spring.datasource.url=" + System.getenv("TEST_DB_URL"),
-                "--spring.datasource.username=" + System.getenv("TEST_DB_USERNAME"),
-                "--spring.datasource.password=" + System.getenv("TEST_DB_PASSWORD"),
-                "--spring.kafka.bootstrap-servers=" + System.getenv("TEST_KAFKA_BOOTSTRAP_SERVERS"),
-                "--server.port=0",
-                "--spring.datasource.hikari.maximum-pool-size=3",
-                "--spring.datasource.hikari.minimum-idle=0",
-                "--spring.datasource.hikari.register-mbeans=false",
-                "--spring.jpa.hibernate.ddl-auto=validate",
-                "--spring.main.banner-mode=off",
-                "--spring.main.log-startup-info=false",
-                "--logging.level.root=WARN",
-                "--logging.level.com.example.taskapplication.service.TaskService=" + (shutdown ? "INFO" : "WARN"),
-                "--logging.level.org.hibernate.SQL=OFF",
-                "--test.mode=" + mode,
-                "--test.worker=" + worker,
-                "--worker.pool.size=1",
-                "--worker.poll-delay-ms=100",
-                "--worker.recovery-delay-ms=100",
-                "--worker.cleanup.cron=-",
-                "--worker.shutdown.grace-period-seconds=" + (shutdown ? 45 : 1),
-                "--worker.shutdown.interrupt-wait-seconds=" + (shutdown ? 10 : 1)
-            )) {
+            .run(arguments.toArray(String[]::new))) {
             if (shutdown) {
                 var registry = context.getBean(KafkaListenerEndpointRegistry.class);
                 await().atMost(Duration.ofSeconds(30)).until(() ->
@@ -270,9 +276,14 @@ public class TaskTestInstance {
 
         @Bean
         @Primary
-        TaskStatusService shutdownTaskStatusService(TaskUpdateService updates, TaskMetrics metrics) {
+        TaskStatusService shutdownTaskStatusService(
+            TaskUpdateService updates,
+            TaskMetrics metrics,
+            @Value("${test.mode}") String mode
+        ) {
             return new TaskStatusService(updates, metrics) {
                 private TaskRun currentRun;
+                private boolean started;
 
                 @Override
                 public void executeTask(TaskRun run) {
@@ -283,8 +294,13 @@ public class TaskTestInstance {
 
                 @Override
                 void performStep(long millis) throws InterruptedException {
-                    signal("WORKING", currentRun);
-                    awaitContinue();
+                    if (!started) {
+                        started = true;
+                        signal("WORKING", currentRun);
+                        if (mode.equals("shutdown")) {
+                            awaitContinue();
+                        }
+                    }
                     super.performStep(millis);
                 }
             };

@@ -27,6 +27,11 @@ public class TaskUpdateService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public boolean requeueInterruptedTask(Long id, UUID executionId) {
+        return taskRepository.requeueInterruptedExecution(id, executionId) == 1;
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public boolean updateTaskStatus(
         Long id,
         UUID executionId,

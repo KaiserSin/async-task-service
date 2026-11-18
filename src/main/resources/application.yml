@@ -45,7 +45,7 @@ worker:
   recovery-delay-ms: 5000
   claim-timeout-seconds: 5
   shutdown:
-    grace-period-seconds: 45
+    grace-period-seconds: 75
     interrupt-wait-seconds: 10
   cleanup:
     retention-days: 30

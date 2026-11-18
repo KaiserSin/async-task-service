@@ -222,35 +222,56 @@ class TaskStatusServiceTest {
     }
 
     @Test
-    @DisplayName("Interrupting a real sleep saves FAILED and restores the interrupt flag")
+    @DisplayName("Interrupting a real sleep requeues the task and restores the interrupt flag")
     void restoresInterruptFlagAfterInterruptedSleep() throws InterruptedException {
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.FAILED, 0, "Task was interrupted"
-        )).thenReturn(true);
+        when(taskUpdateService.requeueInterruptedTask(TASK_ID, EXECUTION_ID)).thenReturn(true);
 
         boolean interrupted = executeInInterruptedThread(taskRun(2500));
 
         assertThat(interrupted).isTrue();
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.FAILED, 0, "Task was interrupted"
-        );
+        verify(taskUpdateService).requeueInterruptedTask(TASK_ID, EXECUTION_ID);
         verifyNoMoreInteractions(taskUpdateService);
     }
 
     @Test
-    @DisplayName("Restores the interrupt flag even when saving FAILED fails")
+    @DisplayName("Restores the interrupt flag even when requeuing the interrupted task fails")
     void restoresInterruptFlagWhenInterruptedResultCannotBeSaved() throws InterruptedException {
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.FAILED, 0, "Task was interrupted"
-        )).thenThrow(new DataAccessResourceFailureException("Failed to save the result"));
+        when(taskUpdateService.requeueInterruptedTask(TASK_ID, EXECUTION_ID))
+            .thenThrow(new DataAccessResourceFailureException("Failed to requeue the task"));
 
         boolean interrupted = executeInInterruptedThread(taskRun(2500));
 
         assertThat(interrupted).isTrue();
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.FAILED, 0, "Task was interrupted"
-        );
+        verify(taskUpdateService).requeueInterruptedTask(TASK_ID, EXECUTION_ID);
         verify(taskMetrics).recordResultSaveError();
+        verifyNoMoreInteractions(taskUpdateService);
+    }
+
+    @Test
+    @DisplayName("An interruption after partial progress requeues without saving a final status")
+    void requeuesInterruptedTaskAfterProgress() throws InterruptedException {
+        doNothing().doThrow(new InterruptedException("Worker shutdown"))
+            .when(taskStatusService).performStep(anyLong());
+        when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40)).thenReturn(true);
+        when(taskUpdateService.requeueInterruptedTask(TASK_ID, EXECUTION_ID)).thenReturn(true);
+
+        assertThat(executeInWorkerThread(taskRun(2500), false)).isTrue();
+
+        var order = inOrder(taskUpdateService);
+        order.verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
+        order.verify(taskUpdateService).requeueInterruptedTask(TASK_ID, EXECUTION_ID);
+        verifyNoMoreInteractions(taskUpdateService);
+    }
+
+    @Test
+    @DisplayName("An interruption from a stale execution does not write another status")
+    void ignoresRejectedRequeue() throws InterruptedException {
+        when(taskUpdateService.requeueInterruptedTask(TASK_ID, EXECUTION_ID)).thenReturn(false);
+
+        assertThat(executeInInterruptedThread(taskRun(2500))).isTrue();
+
+        verify(taskUpdateService).requeueInterruptedTask(TASK_ID, EXECUTION_ID);
+        verify(taskMetrics, never()).recordResultSaveError();
         verifyNoMoreInteractions(taskUpdateService);
     }
 
@@ -259,11 +280,17 @@ class TaskStatusServiceTest {
     }
 
     private boolean executeInInterruptedThread(TaskRun run) throws InterruptedException {
+        return executeInWorkerThread(run, true);
+    }
+
+    private boolean executeInWorkerThread(TaskRun run, boolean interruptBeforeStart) throws InterruptedException {
         AtomicBoolean interruptRestored = new AtomicBoolean();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread worker = new Thread(() -> {
             try {
-                Thread.currentThread().interrupt();
+                if (interruptBeforeStart) {
+                    Thread.currentThread().interrupt();
+                }
                 taskStatusService.executeTask(run);
                 interruptRestored.set(Thread.currentThread().isInterrupted());
             } catch (Throwable ex) {

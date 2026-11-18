@@ -196,21 +196,12 @@ class TaskRecoveryTest {
 
     @Test
     @EnabledOnOs({OS.LINUX, OS.MAC})
-    @DisplayName("SIGTERM finishes active work, stops Kafka, and leaves queued work untouched")
+    @DisplayName("SIGTERM finishes a 60-second task using the configured grace period and leaves queued work untouched")
     void shutsDown() throws Exception {
-        try (AdminClient admin = AdminClient.create(Map.of(
-            AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers(),
-            AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 10000,
-            AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000
-        ))) {
-            admin.createTopics(List.of(
-                new NewTopic("tasks", 1, (short) 1),
-                new NewTopic("tasks.DLT", 1, (short) 1)
-            )).all().get(15, TimeUnit.SECONDS);
-        }
+        createKafkaTopics();
 
         Instance instance = start("shutdown");
-        Task active = createTask(500);
+        Task active = createTask(60_000);
         UUID executionId = awaitRun(instance, "WORKING", active.getId());
         Task queued = createTask(500);
         assertThat(findTask(active.getId()).getStatus()).isEqualTo(TaskStatus.IN_PROGRESS);
@@ -223,7 +214,7 @@ class TaskRecoveryTest {
         });
         proceed(instance);
 
-        long budget = TimeUnit.SECONDS.toNanos(75);
+        long budget = TimeUnit.SECONDS.toNanos(120);
         long remaining = budget - (System.nanoTime() - startedAt);
         assertThat(remaining).isPositive();
         assertThat(instance.process().waitFor(remaining, TimeUnit.NANOSECONDS))
@@ -248,6 +239,60 @@ class TaskRecoveryTest {
         assertThat(waiting.getAttempts()).isZero();
         assertThat(waiting.getExecutionId()).isNull();
         assertThat(waiting.getStartedAt()).isNull();
+    }
+
+    @Test
+    @EnabledOnOs({OS.LINUX, OS.MAC})
+    @DisplayName("SIGTERM after a short grace period requeues an interrupted last attempt for another instance")
+    void requeuesInterruptedTaskOnShutdown() throws Exception {
+        createKafkaTopics();
+        Task active = createTask(60_000);
+        jdbcTemplate.update("UPDATE tasks SET attempts = max_attempts - 1 WHERE id = ?", active.getId());
+        Instance first = start("shutdownInterrupted");
+        UUID oldExecutionId = awaitRun(first, "WORKING", active.getId());
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+            assertThat(findTask(active.getId()).getProgress()).isPositive()
+        );
+        assertThat(findTask(active.getId()).getAttempts()).isEqualTo(3);
+
+        assertThat(first.process().toHandle().destroy()).isTrue();
+        assertThat(first.process().waitFor(30, TimeUnit.SECONDS)).as(readLog(first)).isTrue();
+        assertThat(first.process().exitValue()).isEqualTo(143);
+        assertThat(message(first, "STOPPED")).isEqualTo("TEST:STOPPED:true:true:END");
+
+        Task requeued = findTask(active.getId());
+        assertThat(requeued.getStatus()).isEqualTo(TaskStatus.NEW);
+        assertThat(requeued.getAttempts()).isEqualTo(2);
+        assertThat(requeued.getProgress()).isZero();
+        assertThat(requeued.getResult()).isNull();
+        assertThat(requeued.getExecutionId()).isNull();
+        assertThat(requeued.getLeaseUntil()).isNull();
+        assertThat(requeued.getStartedAt()).isNull();
+        assertThat(requeued.getFinishedAt()).isNull();
+        assertThat(requeued.getNextRetryAt()).isNull();
+
+        Instance second = start("hold");
+        UUID executionId = awaitRun(second, "HOLD", active.getId());
+        assertThat(executionId).isNotEqualTo(oldExecutionId);
+        assertThat(findTask(active.getId()).getStatus()).isEqualTo(TaskStatus.IN_PROGRESS);
+        assertThat(findTask(active.getId()).getAttempts()).isEqualTo(3);
+    }
+
+    private void createKafkaTopics() throws Exception {
+        try (AdminClient admin = AdminClient.create(Map.of(
+            AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers(),
+            AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 10000,
+            AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000
+        ))) {
+            var existing = admin.listTopics().names().get(15, TimeUnit.SECONDS);
+            var missing = List.of("tasks", "tasks.DLT").stream()
+                .filter(topic -> !existing.contains(topic))
+                .map(topic -> new NewTopic(topic, 1, (short) 1))
+                .toList();
+            if (!missing.isEmpty()) {
+                admin.createTopics(missing).all().get(15, TimeUnit.SECONDS);
+            }
+        }
     }
 
     private Task createTask(long duration) {

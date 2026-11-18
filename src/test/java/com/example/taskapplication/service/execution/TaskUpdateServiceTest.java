@@ -69,6 +69,17 @@ class TaskUpdateServiceTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"0, false", "1, true"})
+    @DisplayName("Requeues only the interrupted execution owner and reports whether it was released")
+    void requeuesInterruptedTask(int updatedRows, boolean expected) {
+        when(taskRepository.requeueInterruptedExecution(TASK_ID, EXECUTION_ID)).thenReturn(updatedRows);
+
+        assertThat(taskUpdateService.requeueInterruptedTask(TASK_ID, EXECUTION_ID)).isEqualTo(expected);
+
+        verify(taskRepository).requeueInterruptedExecution(TASK_ID, EXECUTION_ID);
+    }
+
+    @ParameterizedTest
     @ValueSource(ints = {-1, 100})
     @DisplayName("Rejects invalid intermediate progress before accessing the database")
     void updateProgressRejectsInvalidProgress(int progress) {

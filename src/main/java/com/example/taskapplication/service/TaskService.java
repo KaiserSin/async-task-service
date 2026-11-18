@@ -39,7 +39,7 @@ public class TaskService {
     private final KafkaListenerEndpointRegistry kafkaListenerEndpointRegistry;
     private final TaskMetrics taskMetrics;
 
-    @Value("${worker.shutdown.grace-period-seconds:45}")
+    @Value("${worker.shutdown.grace-period-seconds:75}")
     private long shutdownGracePeriodSeconds;
 
     @Value("${worker.shutdown.interrupt-wait-seconds:10}")

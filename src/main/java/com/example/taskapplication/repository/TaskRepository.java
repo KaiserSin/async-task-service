@@ -110,6 +110,29 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """
         UPDATE tasks
+        SET status = 'NEW',
+            execution_id = NULL,
+            lease_until = NULL,
+            next_retry_at = NULL,
+            attempts = GREATEST(attempts - 1, 0),
+            started_at = NULL,
+            finished_at = NULL,
+            progress = 0,
+            result = NULL,
+            version = version + 1
+        WHERE id = :id
+          AND execution_id = :executionId
+          AND status = 'IN_PROGRESS'
+          AND lease_until > CURRENT_TIMESTAMP
+        """, nativeQuery = true)
+    int requeueInterruptedExecution(
+        @Param("id") Long id,
+        @Param("executionId") UUID executionId
+    );
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(value = """
+        UPDATE tasks
         SET status = :newStatus,
             progress = :progress,
             result = :result,

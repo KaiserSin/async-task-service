@@ -51,7 +51,14 @@ public class TaskStatusService {
         } catch (InterruptedException e) {
             log.info("Task {} was interrupted", run.id());
             try {
-                saveFinal(run, TaskStatus.FAILED, progress, "Task was interrupted");
+                if (!taskUpdateService.requeueInterruptedTask(run.id(), run.executionId())) {
+                    log.warn("Ignored interruption from old attempt {} of task {}",
+                        run.executionId(), run.id());
+                }
+            } catch (RuntimeException failure) {
+                taskMetrics.recordResultSaveError();
+                log.error("Could not requeue interrupted task {}; it will be recovered after its lease expires",
+                    run.id(), failure);
             } finally {
                 Thread.currentThread().interrupt();
             }

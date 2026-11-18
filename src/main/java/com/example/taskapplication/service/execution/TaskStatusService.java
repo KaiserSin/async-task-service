@@ -69,8 +69,8 @@ public class TaskStatusService {
                 run.id(), e);
             return;
         } catch (RuntimeException e) {
-            log.error("Task {} failed", run.id(), e);
-            saveFinal(run, TaskStatus.FAILED, progress, "Task failed");
+            log.error("Attempt {} of task {} failed", run.executionId(), run.id(), e);
+            saveAttemptFailure(run, progress);
             return;
         }
 
@@ -79,6 +79,18 @@ public class TaskStatusService {
 
     void performStep(long millis) throws InterruptedException {
         Thread.sleep(millis);
+    }
+
+    private void saveAttemptFailure(TaskRun run, int progress) {
+        try {
+            if (!taskUpdateService.failTaskAttempt(run.id(), run.executionId(), progress, "Task failed")) {
+                log.warn("Ignored failure from old attempt {} of task {}",
+                    run.executionId(), run.id());
+            }
+        } catch (RuntimeException e) {
+            taskMetrics.recordResultSaveError();
+            log.error("Could not save failed attempt of task {}", run.id(), e);
+        }
     }
 
     private void saveFinal(

@@ -37,6 +37,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -252,10 +253,12 @@ class TaskPostgresTest {
             oldRun.id(), oldRun.executionId(), TaskStatus.COMPLETED, 100, "Old result"
         );
         boolean requeued = taskUpdateService.requeueInterruptedTask(oldRun.id(), oldRun.executionId());
+        boolean failureSaved = taskUpdateService.failTaskAttempt(oldRun.id(), oldRun.executionId(), 50, "Old failure");
 
         assertThat(progressUpdated).isFalse();
         assertThat(finished).isFalse();
         assertThat(requeued).isFalse();
+        assertThat(failureSaved).isFalse();
         assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
         assertThat(taskUpdateService.updateTaskStatus(
             newRun.id(), newRun.executionId(), TaskStatus.COMPLETED, 100, "New result"
@@ -331,6 +334,114 @@ class TaskPostgresTest {
         Task before = findTask(task.getId());
 
         assertThat(taskUpdateService.requeueInterruptedTask(task.getId(), run.executionId())).isFalse();
+
+        assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2, 3, 4})
+    @DisplayName("Failed executions wait 30 seconds between attempts and stop at the task's configured limit")
+    void retriesFailuresUntilAttemptLimit(int maxAttempts) {
+        Task task = createTask();
+        jdbcTemplate.update("UPDATE tasks SET max_attempts = ? WHERE id = ?", maxAttempts, task.getId());
+
+        UUID previousExecutionId = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            TaskRun run = taskClaimService.claimNextTask().orElseThrow();
+            assertThat(run.id()).isEqualTo(task.getId());
+            assertThat(run.executionId()).isNotEqualTo(previousExecutionId);
+            assertThat(taskUpdateService.updateProgress(run.id(), run.executionId(), 40)).isTrue();
+            Task before = findTask(task.getId());
+            Instant failureStarted = databaseNow();
+            String failure = "Failure on attempt " + attempt;
+
+            assertThat(taskUpdateService.failTaskAttempt(run.id(), run.executionId(), 40, failure)).isTrue();
+
+            Instant failureSaved = databaseNow();
+            Task saved = findTask(task.getId());
+            assertThat(saved.getAttempts()).isEqualTo(attempt);
+            assertThat(saved.getMaxAttempts()).isEqualTo(maxAttempts);
+            assertThat(saved.getLeaseUntil()).isNull();
+            assertThat(saved.getResult()).isEqualTo(failure);
+            assertThat(saved.getVersion()).isEqualTo(before.getVersion() + 1);
+            assertThat(saved.getCreatedAt()).isEqualTo(before.getCreatedAt());
+
+            if (attempt < maxAttempts) {
+                assertThat(saved.getStatus()).isEqualTo(TaskStatus.NEW);
+                assertThat(saved.getNextRetryAt())
+                    .isBetween(failureStarted.plusSeconds(30), failureSaved.plusSeconds(30));
+                assertThat(saved.getProgress()).isZero();
+                assertThat(saved.getExecutionId()).isNull();
+                assertThat(saved.getStartedAt()).isNull();
+                assertThat(saved.getFinishedAt()).isNull();
+            } else {
+                assertThat(saved.getStatus()).isEqualTo(TaskStatus.FAILED);
+                assertThat(saved.getNextRetryAt()).isNull();
+                assertThat(saved.getProgress()).isEqualTo(40);
+                assertThat(saved.getExecutionId()).isEqualTo(run.executionId());
+                assertThat(saved.getStartedAt()).isEqualTo(before.getStartedAt());
+                assertThat(saved.getFinishedAt()).isBetween(failureStarted, failureSaved);
+            }
+
+            assertThat(taskClaimService.claimNextTask()).isEmpty();
+            List<Task> ready = transactionTemplate.execute(status -> taskRepository.findAndLockNewTasks(
+                TaskStatus.NEW, PageRequest.of(0, 1)
+            ));
+            assertThat(ready).isEmpty();
+            assertThat(taskUpdateService.failTaskAttempt(run.id(), run.executionId(), 40, "Duplicate failure"))
+                .isFalse();
+            assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(saved);
+
+            if (attempt < maxAttempts) {
+                allowRetry(task.getId());
+            }
+            previousExecutionId = run.executionId();
+        }
+    }
+
+    @Test
+    @DisplayName("A task can complete after a failed attempt without losing or refunding its consumed retry")
+    void completesAfterTransientExecutionFailure() {
+        Task task = createTask();
+        TaskRun firstRun = taskClaimService.claimNextTask().orElseThrow();
+        assertThat(taskUpdateService.failTaskAttempt(firstRun.id(), firstRun.executionId(), 0, "Transient failure"))
+            .isTrue();
+        assertThat(taskClaimService.claimNextTask()).isEmpty();
+        allowRetry(task.getId());
+
+        TaskRun retriedRun = taskClaimService.claimNextTask().orElseThrow();
+
+        assertThat(retriedRun.executionId()).isNotEqualTo(firstRun.executionId());
+        assertThat(findTask(task.getId()).getAttempts()).isEqualTo(2);
+        assertThat(findTask(task.getId()).getResult()).isNull();
+        assertThat(taskUpdateService.updateTaskStatus(
+            retriedRun.id(), retriedRun.executionId(), TaskStatus.COMPLETED, 100, "Task completed"
+        )).isTrue();
+        Task completed = findTask(task.getId());
+        assertThat(completed.getStatus()).isEqualTo(TaskStatus.COMPLETED);
+        assertThat(completed.getProgress()).isEqualTo(100);
+        assertThat(completed.getAttempts()).isEqualTo(2);
+        assertThat(completed.getResult()).isEqualTo("Task completed");
+        assertThat(completed.getNextRetryAt()).isNull();
+        assertThat(taskClaimService.claimNextTask()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"expired", "completed"})
+    @DisplayName("A late execution failure cannot change an expired or completed task")
+    void rejectsLateExecutionFailure(String state) {
+        Task task = createTask();
+        TaskRun run = taskClaimService.claimNextTask().orElseThrow();
+        if (state.equals("expired")) {
+            expireLease(task.getId());
+        } else {
+            assertThat(taskUpdateService.updateTaskStatus(
+                run.id(), run.executionId(), TaskStatus.COMPLETED, 100, "Task completed"
+            )).isTrue();
+        }
+        Task before = findTask(task.getId());
+
+        assertThat(taskUpdateService.failTaskAttempt(run.id(), run.executionId(), 40, "Late failure")).isFalse();
 
         assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
     }
@@ -555,6 +666,18 @@ class TaskPostgresTest {
         jdbcTemplate.update("""
             UPDATE tasks
             SET lease_until = CURRENT_TIMESTAMP - INTERVAL '1 second'
+            WHERE id = ?
+            """, id);
+    }
+
+    private Instant databaseNow() {
+        return jdbcTemplate.queryForObject("SELECT CURRENT_TIMESTAMP", Timestamp.class).toInstant();
+    }
+
+    private void allowRetry(Long id) {
+        jdbcTemplate.update("""
+            UPDATE tasks
+            SET next_retry_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
             WHERE id = ?
             """, id);
     }

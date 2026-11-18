@@ -23,6 +23,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.longThat;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -165,23 +166,53 @@ class TaskStatusServiceTest {
     }
 
     @Test
-    @DisplayName("A step error saves FAILED with the last reached progress")
-    void marksFailedOnStepFailure() throws InterruptedException {
+    @DisplayName("A step error records the failed attempt with the last reached progress")
+    void recordsAttemptFailureOnStepFailure() throws InterruptedException {
         TaskRun run = taskRun(2500);
         doNothing().doThrow(new IllegalStateException("Step failed"))
             .when(taskStatusService).performStep(anyLong());
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40)).thenReturn(true);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.FAILED, 40, "Task failed"
+        when(taskUpdateService.failTaskAttempt(
+            TASK_ID, EXECUTION_ID, 40, "Task failed"
         )).thenReturn(true);
 
         taskStatusService.executeTask(run);
 
         verify(taskStatusService, times(2)).performStep(1000L);
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.FAILED, 40, "Task failed"
+        verify(taskUpdateService).failTaskAttempt(
+            TASK_ID, EXECUTION_ID, 40, "Task failed"
         );
+        verifyNoMoreInteractions(taskUpdateService);
+    }
+
+    @Test
+    @DisplayName("An error saving the failed attempt does not trigger a final FAILED update")
+    void doesNotMarkFailedWhenAttemptFailureCannotBeSaved() throws InterruptedException {
+        doThrow(new IllegalStateException("Step failed"))
+            .when(taskStatusService).performStep(500L);
+        when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
+            .thenThrow(new DataAccessResourceFailureException("Failed to save the attempt"));
+
+        assertThatCode(() -> taskStatusService.executeTask(taskRun(500))).doesNotThrowAnyException();
+
+        verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
+        verify(taskMetrics).recordResultSaveError();
+        verifyNoMoreInteractions(taskUpdateService);
+    }
+
+    @Test
+    @DisplayName("A rejected failed-attempt update is not saved again with a final status")
+    void doesNotRetryRejectedAttemptFailure() throws InterruptedException {
+        doThrow(new IllegalStateException("Step failed"))
+            .when(taskStatusService).performStep(500L);
+        when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
+            .thenReturn(false);
+
+        taskStatusService.executeTask(taskRun(500));
+
+        verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
+        verify(taskMetrics, never()).recordResultSaveError();
         verifyNoMoreInteractions(taskUpdateService);
     }
 

@@ -80,6 +80,39 @@ class TaskUpdateServiceTest {
     }
 
     @ParameterizedTest
+    @ValueSource(ints = {-1, 101})
+    @DisplayName("Rejects invalid failed-attempt progress before accessing the database")
+    void failTaskAttemptRejectsInvalidProgress(int progress) {
+        assertThatIllegalArgumentException()
+            .isThrownBy(() -> taskUpdateService.failTaskAttempt(
+                TASK_ID, EXECUTION_ID, progress, "Task failed"
+            ));
+
+        verifyNoInteractions(taskRepository);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "0, 0, 1, true",
+        "42, 42, 1, true",
+        "99, 99, 1, true",
+        "100, 99, 1, true",
+        "42, 42, 0, false"
+    })
+    @DisplayName("Records the failed attempt with its owner and capped progress and returns the update outcome")
+    void failTaskAttemptPreservesOwnerAndNormalizesProgress(
+        int progress, int expectedProgress, int updatedRows, boolean expected
+    ) {
+        when(taskRepository.failExecution(TASK_ID, EXECUTION_ID, expectedProgress, "Task failed"))
+            .thenReturn(updatedRows);
+
+        assertThat(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, progress, "Task failed"))
+            .isEqualTo(expected);
+
+        verify(taskRepository).failExecution(TASK_ID, EXECUTION_ID, expectedProgress, "Task failed");
+    }
+
+    @ParameterizedTest
     @ValueSource(ints = {-1, 100})
     @DisplayName("Rejects invalid intermediate progress before accessing the database")
     void updateProgressRejectsInvalidProgress(int progress) {

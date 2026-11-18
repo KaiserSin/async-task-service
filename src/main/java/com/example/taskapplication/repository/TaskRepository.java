@@ -133,6 +133,49 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """
         UPDATE tasks
+        SET status = CASE
+                WHEN attempts < max_attempts THEN 'NEW'
+                ELSE 'FAILED'
+            END,
+            execution_id = CASE
+                WHEN attempts < max_attempts THEN NULL
+                ELSE execution_id
+            END,
+            lease_until = NULL,
+            next_retry_at = CASE
+                WHEN attempts < max_attempts
+                    THEN CURRENT_TIMESTAMP + INTERVAL '30 seconds'
+                ELSE NULL
+            END,
+            started_at = CASE
+                WHEN attempts < max_attempts THEN NULL
+                ELSE started_at
+            END,
+            finished_at = CASE
+                WHEN attempts >= max_attempts THEN CURRENT_TIMESTAMP
+                ELSE NULL
+            END,
+            progress = CASE
+                WHEN attempts < max_attempts THEN 0
+                ELSE :progress
+            END,
+            result = :result,
+            version = version + 1
+        WHERE id = :id
+          AND execution_id = :executionId
+          AND status = 'IN_PROGRESS'
+          AND lease_until > CURRENT_TIMESTAMP
+        """, nativeQuery = true)
+    int failExecution(
+        @Param("id") Long id,
+        @Param("executionId") UUID executionId,
+        @Param("progress") int progress,
+        @Param("result") String result
+    );
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(value = """
+        UPDATE tasks
         SET status = :newStatus,
             progress = :progress,
             result = :result,

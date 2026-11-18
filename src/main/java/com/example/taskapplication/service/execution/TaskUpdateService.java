@@ -32,6 +32,14 @@ public class TaskUpdateService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public boolean failTaskAttempt(Long id, UUID executionId, int progress, String result) {
+        if (progress < 0 || progress > 100) {
+            throw new IllegalArgumentException("Progress must be between 0 and 100");
+        }
+        return taskRepository.failExecution(id, executionId, Math.min(progress, 99), result) == 1;
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public boolean updateTaskStatus(
         Long id,
         UUID executionId,

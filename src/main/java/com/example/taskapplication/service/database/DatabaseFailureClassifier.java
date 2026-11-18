@@ -25,6 +25,7 @@ public class DatabaseFailureClassifier {
 
     public enum Action {
         RETRY,
+        RECOVER,
         STOP,
         NOT_DATABASE
     }
@@ -92,17 +93,27 @@ public class DatabaseFailureClassifier {
             return Action.STOP;
         }
 
+        boolean dataFailure = false;
+        boolean retryableSqlState = false;
         for (String sqlState : sqlStates) {
+            if (sqlState.startsWith("22") || sqlState.startsWith("23")) {
+                dataFailure = true;
+                continue;
+            }
             boolean retryableConnection = "08001".equals(sqlState) && networkFailure;
             if (!RETRYABLE_SQL_STATES.contains(sqlState) && !retryableConnection) {
                 return Action.STOP;
             }
+            retryableSqlState = true;
         }
 
-        if (!sqlStates.isEmpty() || retryableWithoutCode || networkFailure) {
+        // Infrastructure failures take precedence over a bad record in a SQL exception chain.
+        if (retryableSqlState || retryableWithoutCode || networkFailure) {
             return Action.RETRY;
         }
-
+        if (dataFailure) {
+            return Action.RECOVER;
+        }
         return Action.STOP;
     }
 

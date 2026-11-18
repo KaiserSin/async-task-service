@@ -3,6 +3,7 @@ package com.example.taskapplication.dto;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
@@ -17,6 +18,7 @@ public class TaskRequestDTO {
 
     @NotBlank(message = "Task name is required")
     @Size(max = 255, message = "Task name must be 255 characters or fewer")
+    @Pattern(regexp = "[^\\p{Cc}]*", message = "Task name must not contain control characters")
     private String name;
 
     @NotNull(message = "Duration is required")

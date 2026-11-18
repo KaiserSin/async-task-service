@@ -13,6 +13,7 @@ import org.springframework.kafka.listener.MessageListenerContainer;
 import org.springframework.kafka.listener.SeekUtils;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.util.backoff.BackOff;
+import org.springframework.util.backoff.FixedBackOff;
 
 import java.time.Duration;
 import java.util.List;
@@ -42,6 +43,11 @@ public class DatabaseAfterRollbackProcessor<K, V> extends DefaultAfterRollbackPr
         this.databaseFailureClassifier = databaseFailureClassifier;
         this.pauseService = new ListenerContainerPauseService(null, taskScheduler);
         this.retryDelay = Duration.ofMillis(retryDelayMs);
+        setBackOffFunction((record, exception) ->
+            databaseFailureClassifier.classify(exception) == DatabaseFailureClassifier.Action.RECOVER
+                ? new FixedBackOff(0L, 0L)
+                : backOff
+        );
     }
 
     @Override
@@ -54,7 +60,8 @@ public class DatabaseAfterRollbackProcessor<K, V> extends DefaultAfterRollbackPr
         ContainerProperties.EOSMode eosMode
     ) {
         var action = databaseFailureClassifier.classify(exception);
-        if (action == DatabaseFailureClassifier.Action.NOT_DATABASE) {
+        if (action == DatabaseFailureClassifier.Action.NOT_DATABASE
+            || action == DatabaseFailureClassifier.Action.RECOVER) {
             super.process(records, consumer, container, exception, recoverable, eosMode);
             return;
         }

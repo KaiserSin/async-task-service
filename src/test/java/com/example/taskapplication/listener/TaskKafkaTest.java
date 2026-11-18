@@ -270,6 +270,62 @@ class TaskKafkaTest {
     }
 
     @Test
+    @DisplayName("A name with NUL is sent to DLT and the next task is processed")
+    void rejectsNulWithoutStoppingListener() throws Exception {
+        startListener();
+        TaskRequestDTO invalid = request();
+        invalid.setName("Task\u0000name");
+
+        RecordMetadata rejected = send(invalid);
+        awaitOffset(rejected);
+        TaskRequestDTO valid = request();
+        awaitOffset(send(valid));
+
+        assertThat(container.isRunning()).isTrue();
+        assertThat(taskRepository.count()).isEqualTo(1);
+        assertThat(findTask(valid.getEventId()).getName()).isEqualTo("Task");
+        ConsumerRecord<String, byte[]> dlt = readOneDlt();
+        assertThat(objectMapper.readTree(dlt.value()))
+            .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(invalid)));
+        assertOrigin(dlt, rejected, invalid.getEventId().toString());
+        assertThat(new String(dlt.headers().lastHeader(KafkaHeaders.DLT_EXCEPTION_MESSAGE).value(),
+            StandardCharsets.UTF_8)).contains("Task name must not contain control characters");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"name", "duration"})
+    @DisplayName("PostgreSQL data and constraint errors go directly to DLT without stopping the listener")
+    void recoversDatabaseDataErrors(String field) throws Exception {
+        createTopic(topic + ".DLT");
+        AtomicInteger deliveries = new AtomicInteger();
+        // Bypass DTO validation to exercise database failures as a separate line of defense.
+        listen(record -> {
+            deliveries.incrementAndGet();
+            taskRegistrationService.register(record.value());
+        });
+        TaskRequestDTO invalid = request();
+        if (field.equals("name")) {
+            invalid.setName("Task\u0000name");
+        } else {
+            invalid.setDuration(0L);
+        }
+
+        RecordMetadata rejected = send(invalid);
+        awaitOffset(rejected);
+        TaskRequestDTO valid = request();
+        awaitOffset(send(valid));
+
+        assertThat(deliveries).hasValue(2);
+        assertThat(container.isRunning()).isTrue();
+        assertThat(taskRepository.count()).isEqualTo(1);
+        assertThat(findTask(valid.getEventId()).getName()).isEqualTo("Task");
+        ConsumerRecord<String, byte[]> dlt = readOneDlt();
+        assertThat(objectMapper.readTree(dlt.value()))
+            .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(invalid)));
+        assertOrigin(dlt, rejected, invalid.getEventId().toString());
+    }
+
+    @Test
     @DisplayName("Malformed JSON is sent to DLT with its original bytes")
     void sendsBrokenJson() throws Exception {
         createTopic(topic + ".DLT");

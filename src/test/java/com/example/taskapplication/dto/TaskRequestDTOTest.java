@@ -8,11 +8,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.UUID;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -55,6 +57,37 @@ class TaskRequestDTOTest {
         assertThat(violations).isEmpty();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"Обычная задача", "Tâche à réaliser", "任务 ✅", "Проверить 👩‍💻"})
+    @DisplayName("Accepts Unicode names without control characters")
+    void acceptsUnicodeName(String name) {
+        TaskRequestDTO dto = validRequest();
+        dto.setName(name);
+
+        assertThat(validator.validate(dto)).isEmpty();
+    }
+
+    @ParameterizedTest
+    @MethodSource("controlCharacters")
+    @DisplayName("Rejects every Unicode control character in a name")
+    void rejectsControlCharacterInName(int codePoint) {
+        TaskRequestDTO dto = validRequest();
+        dto.setName("Task" + (char) codePoint + "name");
+
+        var violations = validator.validate(dto);
+
+        assertThat(violations)
+            .extracting(violation -> violation.getPropertyPath().toString())
+            .containsExactly("name");
+        assertThat(violations)
+            .extracting(violation -> violation.getMessage())
+            .containsExactly("Task name must not contain control characters");
+    }
+
+    private static IntStream controlCharacters() {
+        return IntStream.concat(IntStream.rangeClosed(0, 31), IntStream.rangeClosed(127, 159));
+    }
+
     @Test
     @DisplayName("Rejects a missing event ID")
     void rejectsMissingEventId() {
@@ -80,7 +113,10 @@ class TaskRequestDTOTest {
 
         assertThat(violations)
             .extracting(violation -> violation.getPropertyPath().toString())
-            .containsExactly("name");
+            .containsOnly("name");
+        assertThat(violations)
+            .extracting(violation -> violation.getMessage())
+            .contains("Task name is required");
     }
 
     @Test

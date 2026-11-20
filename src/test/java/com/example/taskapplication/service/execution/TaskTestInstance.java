@@ -7,12 +7,12 @@ import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.metrics.TaskMetrics;
 import com.example.taskapplication.model.Task;
-import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
 import com.example.taskapplication.service.TaskPoller;
 import com.example.taskapplication.service.maintenance.MaintenanceScheduler;
 import com.example.taskapplication.service.maintenance.TaskCleanupService;
 import com.example.taskapplication.service.maintenance.TaskRecoveryService;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
@@ -24,12 +24,10 @@ import org.springframework.boot.context.TypeExcludeFilter;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.TestComponent;
 import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.ApplicationListener;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
-import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.core.type.classreading.MetadataReader;
 import org.springframework.core.type.classreading.MetadataReaderFactory;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
@@ -143,12 +141,8 @@ public class TaskTestInstance {
                     signal("PAUSED", run);
                     awaitContinue();
                     boolean progress = updates.updateProgress(run.id(), run.executionId(), 50);
-                    boolean completed = updates.updateTaskStatus(
-                        run.id(), run.executionId(), TaskStatus.COMPLETED, 100, "Old result"
-                    );
-                    boolean failed = updates.updateTaskStatus(
-                        run.id(), run.executionId(), TaskStatus.FAILED, 50, "Old error"
-                    );
+                    boolean completed = updates.complete(run.id(), run.executionId(), "Old result");
+                    boolean failed = updates.fail(run.id(), run.executionId(), 50, "Old error").isPresent();
                     signal("OLD_RESULT", progress + ":" + completed + ":" + failed);
 
                     new CountDownLatch(1).await();
@@ -303,11 +297,11 @@ public class TaskTestInstance {
         }
 
         @Bean
-        ApplicationListener<ContextClosedEvent> shutdownState(
+        DisposableBean shutdownState(
             ThreadPoolExecutor taskExecutor,
             KafkaListenerEndpointRegistry registry
         ) {
-            return event -> signal("STOPPED", taskExecutor.isTerminated() + ":"
+            return () -> signal("STOPPED", taskExecutor.isTerminated() + ":"
                 + registry.getListenerContainers().stream().noneMatch(container -> container.isRunning()));
         }
     }

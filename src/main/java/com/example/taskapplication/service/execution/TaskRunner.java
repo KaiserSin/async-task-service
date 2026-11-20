@@ -95,7 +95,7 @@ public class TaskRunner {
             logExpiredLease(run);
             return;
         }
-        saveFinal(run, TaskStatus.COMPLETED, 100, "Task completed");
+        saveCompletion(run);
     }
 
     long nanoTime() {
@@ -109,7 +109,7 @@ public class TaskRunner {
 
     private void saveAttemptFailure(TaskRun run, int progress) {
         try {
-            var status = taskUpdateService.failTaskAttempt(run.id(), run.executionId(), progress, "Task failed");
+            var status = taskUpdateService.fail(run.id(), run.executionId(), progress, "Task failed");
             if (status.isEmpty()) {
                 log.warn("Ignored failure from old attempt {} of task {}",
                     run.executionId(), run.id());
@@ -122,20 +122,14 @@ public class TaskRunner {
         }
     }
 
-    private void saveFinal(
-        TaskRun run, TaskStatus status, int progress, String result
-    ) {
+    private void saveCompletion(TaskRun run) {
         try {
-            boolean updated = taskUpdateService.updateTaskStatus(
-                run.id(), run.executionId(), status, progress, result
-            );
+            boolean updated = taskUpdateService.complete(run.id(), run.executionId(), "Task completed");
             if (!updated) {
                 log.warn("Ignored result from old attempt {} of task {}",
                     run.executionId(), run.id());
-            } else if (status == TaskStatus.COMPLETED) {
+            } else {
                 taskMetrics.recordCompleted();
-            } else if (status == TaskStatus.FAILED) {
-                taskMetrics.recordFailed(1);
             }
         } catch (RuntimeException e) {
             taskMetrics.recordResultSaveError();

@@ -39,12 +39,12 @@ class TaskRegistrationServiceTest {
     @DisplayName("Strips surrounding whitespace and registers a new task without a duplicate lookup")
     void registersNewTaskWithNormalizedName() {
         TaskRequestDTO dto = request("  My task  ");
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My task", 1_000L, dto.ownerUsername()))
             .thenReturn(1);
 
         taskRegistrationService.register(dto);
 
-        verify(taskRepository).insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername());
+        verify(taskRepository).insertIfAbsent(dto.eventId(), "My task", 1_000L, dto.ownerUsername());
         verify(taskRepository, never()).findByEventId(any());
     }
 
@@ -52,12 +52,12 @@ class TaskRegistrationServiceTest {
     @DisplayName("Preserves spaces inside the name")
     void preservesSpacesInsideName() {
         TaskRequestDTO dto = request("  My  task  ");
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My  task", 1_000L, dto.getOwnerUsername()))
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My  task", 1_000L, dto.ownerUsername()))
             .thenReturn(1);
 
         taskRegistrationService.register(dto);
 
-        verify(taskRepository).insertIfAbsent(dto.getEventId(), "My  task", 1_000L, dto.getOwnerUsername());
+        verify(taskRepository).insertIfAbsent(dto.eventId(), "My  task", 1_000L, dto.ownerUsername());
     }
 
     @Test
@@ -65,25 +65,25 @@ class TaskRegistrationServiceTest {
     void acceptsIdenticalDuplicate() {
         TaskRequestDTO dto = request("  My task  ");
         Task existing = existingTask(dto);
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My task", 1_000L, dto.ownerUsername()))
             .thenReturn(0);
-        when(taskRepository.findByEventId(dto.getEventId()))
+        when(taskRepository.findByEventId(dto.eventId()))
             .thenReturn(Optional.of(existing));
 
         assertThatCode(() -> taskRegistrationService.register(dto))
             .doesNotThrowAnyException();
 
-        verify(taskRepository).findByEventId(dto.getEventId());
+        verify(taskRepository).findByEventId(dto.eventId());
     }
 
     @Test
     @DisplayName("Rejects a duplicate with a different name")
     void rejectsDuplicateWithDifferentName() {
         TaskRequestDTO dto = request("My task");
-        Task existing = task(dto.getEventId(), dto.getOwnerUsername(), "Another task", dto.getDuration());
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
+        Task existing = task(dto.eventId(), dto.ownerUsername(), "Another task", dto.duration());
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My task", 1_000L, dto.ownerUsername()))
             .thenReturn(0);
-        when(taskRepository.findByEventId(dto.getEventId()))
+        when(taskRepository.findByEventId(dto.eventId()))
             .thenReturn(Optional.of(existing));
 
         assertThatThrownBy(() -> taskRegistrationService.register(dto))
@@ -94,10 +94,10 @@ class TaskRegistrationServiceTest {
     @DisplayName("Rejects a duplicate with a different duration")
     void rejectsDuplicateWithDifferentDuration() {
         TaskRequestDTO dto = request("My task");
-        Task existing = task(dto.getEventId(), dto.getOwnerUsername(), dto.getName().strip(), 2_000L);
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
+        Task existing = task(dto.eventId(), dto.ownerUsername(), dto.name().strip(), 2_000L);
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My task", 1_000L, dto.ownerUsername()))
             .thenReturn(0);
-        when(taskRepository.findByEventId(dto.getEventId()))
+        when(taskRepository.findByEventId(dto.eventId()))
             .thenReturn(Optional.of(existing));
 
         assertThatThrownBy(() -> taskRegistrationService.register(dto))
@@ -108,10 +108,10 @@ class TaskRegistrationServiceTest {
     @DisplayName("A duplicate event cannot change the task owner")
     void rejectsDuplicateWithDifferentOwner() {
         TaskRequestDTO dto = request("My task");
-        Task existing = task(dto.getEventId(), "bob", dto.getName().strip(), dto.getDuration());
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, "alice"))
+        Task existing = task(dto.eventId(), "bob", dto.name().strip(), dto.duration());
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My task", 1_000L, "alice"))
             .thenReturn(0);
-        when(taskRepository.findByEventId(dto.getEventId())).thenReturn(Optional.of(existing));
+        when(taskRepository.findByEventId(dto.eventId())).thenReturn(Optional.of(existing));
 
         assertThatThrownBy(() -> taskRegistrationService.register(dto))
             .isInstanceOf(InvalidTaskMessageException.class);
@@ -121,10 +121,10 @@ class TaskRegistrationServiceTest {
     @DisplayName("A new message cannot claim ownership of a legacy task")
     void rejectsDuplicateOfUnownedLegacyTask() {
         TaskRequestDTO dto = request("My task");
-        Task existing = task(dto.getEventId(), null, dto.getName().strip(), dto.getDuration());
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, "alice"))
+        Task existing = task(dto.eventId(), null, dto.name().strip(), dto.duration());
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My task", 1_000L, "alice"))
             .thenReturn(0);
-        when(taskRepository.findByEventId(dto.getEventId())).thenReturn(Optional.of(existing));
+        when(taskRepository.findByEventId(dto.eventId())).thenReturn(Optional.of(existing));
 
         assertThatThrownBy(() -> taskRegistrationService.register(dto))
             .isInstanceOf(InvalidTaskMessageException.class);
@@ -133,39 +133,34 @@ class TaskRegistrationServiceTest {
     @Test
     @DisplayName("Preserves the exact owner identity without stripping or changing case")
     void preservesExactOwnerIdentity() {
-        TaskRequestDTO dto = request("My task");
-        dto.setOwnerUsername(" Alice ");
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, " Alice "))
+        TaskRequestDTO dto = new TaskRequestDTO(UUID.randomUUID(), " Alice ", "My task", 1_000L);
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My task", 1_000L, " Alice "))
             .thenReturn(1);
 
         taskRegistrationService.register(dto);
 
-        verify(taskRepository).insertIfAbsent(dto.getEventId(), "My task", 1_000L, " Alice ");
+        verify(taskRepository).insertIfAbsent(dto.eventId(), "My task", 1_000L, " Alice ");
     }
 
     @Test
     @DisplayName("Reports an error when the event record is missing after a conflict")
     void rejectsMissingTaskAfterInsertConflict() {
         TaskRequestDTO dto = request("My task");
-        when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
+        when(taskRepository.insertIfAbsent(dto.eventId(), "My task", 1_000L, dto.ownerUsername()))
             .thenReturn(0);
-        when(taskRepository.findByEventId(dto.getEventId()))
+        when(taskRepository.findByEventId(dto.eventId()))
             .thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> taskRegistrationService.register(dto))
-            .isInstanceOf(IllegalStateException.class);
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("eventId=" + dto.eventId());
     }
 
     private TaskRequestDTO request(String name) {
-        TaskRequestDTO dto = new TaskRequestDTO();
-        dto.setEventId(UUID.randomUUID());
-        dto.setOwnerUsername("alice");
-        dto.setName(name);
-        dto.setDuration(1_000L);
-        return dto;
+        return new TaskRequestDTO(UUID.randomUUID(), "alice", name, 1_000L);
     }
 
     private Task existingTask(TaskRequestDTO dto) {
-        return task(dto.getEventId(), dto.getOwnerUsername(), dto.getName().strip(), dto.getDuration());
+        return task(dto.eventId(), dto.ownerUsername(), dto.name().strip(), dto.duration());
     }
 }

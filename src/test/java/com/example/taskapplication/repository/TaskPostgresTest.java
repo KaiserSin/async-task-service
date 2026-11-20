@@ -13,6 +13,7 @@ import com.example.taskapplication.service.execution.TaskClaimService;
 import com.example.taskapplication.service.execution.TaskRunner;
 import com.example.taskapplication.service.execution.TaskUpdateService;
 import com.example.taskapplication.service.maintenance.TaskRecoveryService;
+import com.example.taskapplication.repository.TaskRepository.RecoveryCounts;
 import com.example.taskapplication.service.maintenance.TaskCleanupService;
 import db.migration.V4__add_task_cleanup_index;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -27,7 +28,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -36,7 +36,6 @@ import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.QueryTimeoutException;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
@@ -74,9 +73,6 @@ import static com.example.taskapplication.model.TaskFixtures.task;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.util.ReflectionTestUtils.setField;
 
@@ -193,7 +189,7 @@ class TaskPostgresTest {
 
         expireLease(task.getId());
         Instant recoveryStarted = databaseNow();
-        assertThat(taskRecoveryService.recoverExpiredTasks()).hasSize(1);
+        assertThat(taskRecoveryService.recoverExpiredTasks()).isEqualTo(new RecoveryCounts(1, 0));
         Instant recoverySaved = databaseNow();
         Task recovered = findTask(task.getId());
         assertThat(recovered.getStatus()).isEqualTo(TaskStatus.NEW);
@@ -238,7 +234,7 @@ class TaskPostgresTest {
     void skipsLockedTask() throws Exception {
         Task first = createTask();
         Task second = createTask();
-        createTask();
+        Task third = createTask();
         CountDownLatch locked = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         Future<?> holder = lockTask(first.getId(), locked, release);
@@ -255,34 +251,7 @@ class TaskPostgresTest {
             holder.get(10, TimeUnit.SECONDS);
         }
         assertThat(findTask(first.getId()).getStatus()).isEqualTo(TaskStatus.NEW);
-    }
-
-    @Test
-    @DisplayName("Hibernate skips a locked task and selects only one task")
-    void hibernateSkipsLockedTask() throws Exception {
-        Task first = createTask();
-        Task second = createTask();
-        createTask();
-        CountDownLatch locked = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        Future<?> holder = lockTask(first.getId(), locked, release);
-
-        try {
-            awaitLatch(locked);
-            Future<List<Long>> claim = executor.submit(() -> transactionTemplate.execute(status ->
-                taskRepository.findAndLockNewTasks(TaskStatus.NEW, PageRequest.of(0, 1))
-                    .stream()
-                    .map(Task::getId)
-                    .toList()
-            ));
-
-            List<Long> ids = claim.get(10, TimeUnit.SECONDS);
-
-            assertThat(ids).containsExactly(second.getId());
-        } finally {
-            release.countDown();
-            holder.get(10, TimeUnit.SECONDS);
-        }
+        assertThat(findTask(third.getId()).getStatus()).isEqualTo(TaskStatus.NEW);
     }
 
     @Test
@@ -346,16 +315,14 @@ class TaskPostgresTest {
             }
 
             @Override
-            public boolean updateTaskStatus(
-                Long id, UUID executionId, TaskStatus status, int progress, String result
-            ) {
-                return taskUpdateService.updateTaskStatus(id, executionId, status, progress, result);
+            public boolean complete(Long id, UUID executionId, String result) {
+                return taskUpdateService.complete(id, executionId, result);
             }
         };
 
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
-            new TaskRunner(updates, new TaskMetrics(registry, jdbcTemplate), new DemoTaskHandler(), workerProperties).executeTask(run);
+            new TaskRunner(updates, new TaskMetrics(registry, taskRepository), new DemoTaskHandler(), workerProperties).executeTask(run);
         } finally {
             registry.close();
         }
@@ -382,9 +349,7 @@ class TaskPostgresTest {
         Task before = findTask(task.getId());
 
         assertThat(taskUpdateService.updateProgress(run.id(), run.executionId(), 40)).isFalse();
-        assertThat(taskUpdateService.updateTaskStatus(
-            run.id(), run.executionId(), TaskStatus.COMPLETED, 100, "Late result"
-        )).isFalse();
+        assertThat(taskUpdateService.complete(run.id(), run.executionId(), "Late result")).isFalse();
 
         assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
     }
@@ -396,7 +361,7 @@ class TaskPostgresTest {
         TaskRun oldRun = taskClaimService.claimNextTask().orElseThrow();
 
         expireLease(task.getId());
-        assertThat(taskRecoveryService.recoverExpiredTasks()).hasSize(1);
+        assertThat(taskRecoveryService.recoverExpiredTasks()).isEqualTo(new RecoveryCounts(1, 0));
         jdbcTemplate.update("""
             UPDATE tasks
             SET next_retry_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
@@ -409,20 +374,16 @@ class TaskPostgresTest {
         Task before = findTask(task.getId());
 
         boolean progressUpdated = taskUpdateService.updateProgress(oldRun.id(), oldRun.executionId(), 50);
-        boolean finished = taskUpdateService.updateTaskStatus(
-            oldRun.id(), oldRun.executionId(), TaskStatus.COMPLETED, 100, "Old result"
-        );
+        boolean finished = taskUpdateService.complete(oldRun.id(), oldRun.executionId(), "Old result");
         boolean requeued = taskUpdateService.requeueInterruptedTask(oldRun.id(), oldRun.executionId());
-        Optional<TaskStatus> failureSaved = taskUpdateService.failTaskAttempt(oldRun.id(), oldRun.executionId(), 50, "Old failure");
+        Optional<TaskStatus> failureSaved = taskUpdateService.fail(oldRun.id(), oldRun.executionId(), 50, "Old failure");
 
         assertThat(progressUpdated).isFalse();
         assertThat(finished).isFalse();
         assertThat(requeued).isFalse();
         assertThat(failureSaved).isEmpty();
         assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
-        assertThat(taskUpdateService.updateTaskStatus(
-            newRun.id(), newRun.executionId(), TaskStatus.COMPLETED, 100, "New result"
-        )).isTrue();
+        assertThat(taskUpdateService.complete(newRun.id(), newRun.executionId(), "New result")).isTrue();
         Task saved = findTask(task.getId());
         assertThat(saved.getStatus()).isEqualTo(TaskStatus.COMPLETED);
         assertThat(saved.getProgress()).isEqualTo(100);
@@ -461,9 +422,7 @@ class TaskPostgresTest {
         assertThat(resumed.id()).isEqualTo(task.getId());
         assertThat(resumed.executionId()).isNotEqualTo(interrupted.executionId());
         assertThat(findTask(task.getId()).getAttempts()).isEqualTo(previousAttempts + 1);
-        assertThat(taskUpdateService.updateTaskStatus(
-            resumed.id(), resumed.executionId(), TaskStatus.COMPLETED, 100, "Task completed"
-        )).isTrue();
+        assertThat(taskUpdateService.complete(resumed.id(), resumed.executionId(), "Task completed")).isTrue();
         assertThat(findTask(task.getId()).getStatus()).isEqualTo(TaskStatus.COMPLETED);
     }
 
@@ -478,7 +437,7 @@ class TaskPostgresTest {
         assertThat(taskUpdateService.requeueInterruptedTask(task.getId(), run.executionId())).isFalse();
 
         assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
-        assertThat(taskRecoveryService.recoverExpiredTasks()).hasSize(1);
+        assertThat(taskRecoveryService.recoverExpiredTasks()).isEqualTo(new RecoveryCounts(1, 0));
         assertThat(findTask(task.getId()).getStatus()).isEqualTo(TaskStatus.NEW);
         assertThat(findTask(task.getId()).getAttempts()).isEqualTo(1);
     }
@@ -488,9 +447,7 @@ class TaskPostgresTest {
     void rejectsRequeueOfCompletedTask() {
         Task task = createTask();
         TaskRun run = taskClaimService.claimNextTask().orElseThrow();
-        assertThat(taskUpdateService.updateTaskStatus(
-            run.id(), run.executionId(), TaskStatus.COMPLETED, 100, "Task completed"
-        )).isTrue();
+        assertThat(taskUpdateService.complete(run.id(), run.executionId(), "Task completed")).isTrue();
         Task before = findTask(task.getId());
 
         assertThat(taskUpdateService.requeueInterruptedTask(task.getId(), run.executionId())).isFalse();
@@ -515,7 +472,7 @@ class TaskPostgresTest {
             Instant failureStarted = databaseNow();
             String failure = "Failure on attempt " + attempt;
 
-            assertThat(taskUpdateService.failTaskAttempt(run.id(), run.executionId(), 40, failure))
+            assertThat(taskUpdateService.fail(run.id(), run.executionId(), 40, failure))
                 .contains(attempt < maxAttempts ? TaskStatus.NEW : TaskStatus.FAILED);
 
             Instant failureSaved = databaseNow();
@@ -546,11 +503,7 @@ class TaskPostgresTest {
             }
 
             assertThat(taskClaimService.claimNextTask()).isEmpty();
-            List<Task> ready = transactionTemplate.execute(status -> taskRepository.findAndLockNewTasks(
-                TaskStatus.NEW, PageRequest.of(0, 1)
-            ));
-            assertThat(ready).isEmpty();
-            assertThat(taskUpdateService.failTaskAttempt(run.id(), run.executionId(), 40, "Duplicate failure"))
+            assertThat(taskUpdateService.fail(run.id(), run.executionId(), 40, "Duplicate failure"))
                 .isEmpty();
             assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(saved);
 
@@ -570,7 +523,7 @@ class TaskPostgresTest {
         TaskRun run = taskClaimService.claimNextTask().orElseThrow();
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
-            TaskMetrics metrics = new TaskMetrics(registry, jdbcTemplate);
+            TaskMetrics metrics = new TaskMetrics(registry, taskRepository);
             TaskRunner taskRunner = new TaskRunner(taskUpdateService, metrics,
                 (claimed, elapsed, step) -> { throw new IllegalStateException("Handler failed"); },
                 workerProperties);
@@ -599,7 +552,7 @@ class TaskPostgresTest {
         TaskRun run = taskClaimService.claimNextTask().orElseThrow();
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
-            TaskMetrics metrics = new TaskMetrics(registry, jdbcTemplate);
+            TaskMetrics metrics = new TaskMetrics(registry, taskRepository);
             TaskRunner taskRunner = new TaskRunner(taskUpdateService, metrics,
                 (claimed, elapsed, step) -> {}, workerProperties);
 
@@ -626,7 +579,7 @@ class TaskPostgresTest {
         expireLease(retryable.getId());
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
-            TaskMetrics metrics = new TaskMetrics(registry, jdbcTemplate);
+            TaskMetrics metrics = new TaskMetrics(registry, taskRepository);
             MaintenanceScheduler scheduler = new MaintenanceScheduler(mock(WorkerLifecycle.class),
                 taskRecoveryService, mock(TaskCleanupService.class), metrics);
 
@@ -648,7 +601,7 @@ class TaskPostgresTest {
     void completesAfterTransientExecutionFailure() {
         Task task = createTask();
         TaskRun firstRun = taskClaimService.claimNextTask().orElseThrow();
-        assertThat(taskUpdateService.failTaskAttempt(firstRun.id(), firstRun.executionId(), 0, "Transient failure"))
+        assertThat(taskUpdateService.fail(firstRun.id(), firstRun.executionId(), 0, "Transient failure"))
             .contains(TaskStatus.NEW);
         assertThat(taskClaimService.claimNextTask()).isEmpty();
         allowRetry(task.getId());
@@ -658,9 +611,7 @@ class TaskPostgresTest {
         assertThat(retriedRun.executionId()).isNotEqualTo(firstRun.executionId());
         assertThat(findTask(task.getId()).getAttempts()).isEqualTo(2);
         assertThat(findTask(task.getId()).getResult()).isNull();
-        assertThat(taskUpdateService.updateTaskStatus(
-            retriedRun.id(), retriedRun.executionId(), TaskStatus.COMPLETED, 100, "Task completed"
-        )).isTrue();
+        assertThat(taskUpdateService.complete(retriedRun.id(), retriedRun.executionId(), "Task completed")).isTrue();
         Task completed = findTask(task.getId());
         assertThat(completed.getStatus()).isEqualTo(TaskStatus.COMPLETED);
         assertThat(completed.getProgress()).isEqualTo(100);
@@ -679,13 +630,11 @@ class TaskPostgresTest {
         if (state.equals("expired")) {
             expireLease(task.getId());
         } else {
-            assertThat(taskUpdateService.updateTaskStatus(
-                run.id(), run.executionId(), TaskStatus.COMPLETED, 100, "Task completed"
-            )).isTrue();
+            assertThat(taskUpdateService.complete(run.id(), run.executionId(), "Task completed")).isTrue();
         }
         Task before = findTask(task.getId());
 
-        assertThat(taskUpdateService.failTaskAttempt(run.id(), run.executionId(), 40, "Late failure")).isEmpty();
+        assertThat(taskUpdateService.fail(run.id(), run.executionId(), 40, "Late failure")).isEmpty();
 
         assertThat(findTask(task.getId())).usingRecursiveComparison().isEqualTo(before);
     }
@@ -699,7 +648,8 @@ class TaskPostgresTest {
         taskClaimService.claimNextTask().orElseThrow();
         assertThat(findTask(task.getId()).getAttempts()).isEqualTo(3);
         expireLease(task.getId());
-        assertThat(taskRecoveryService.recoverExpiredTasks()).hasSize(1);
+        assertThat(taskRecoveryService.recoverExpiredTasks()).isEqualTo(new RecoveryCounts(0, 1));
+        assertThat(taskRecoveryService.recoverExpiredTasks()).isEqualTo(new RecoveryCounts(0, 0));
 
         Task saved = findTask(task.getId());
         assertThat(saved.getStatus()).isEqualTo(TaskStatus.FAILED);
@@ -725,12 +675,13 @@ class TaskPostgresTest {
     }
 
     @Test
-    @DisplayName("Queue metrics use the partial NEW index and cache counts and ready age")
-    void readsQueueMetrics() {
+    @DisplayName("Queue metrics use the partial NEW index and read counts and ready age")
+    void readsQueueMetrics() throws Exception {
+        String metricsSql = TaskRepository.class.getMethod("readQueueStats")
+            .getAnnotation(org.springframework.data.jpa.repository.Query.class).value();
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        JdbcTemplate observedJdbc = spy(jdbcTemplate);
         try {
-            TaskMetrics metrics = new TaskMetrics(registry, observedJdbc);
+            TaskMetrics metrics = new TaskMetrics(registry, taskRepository);
             metrics.updateQueueMetrics();
             assertThat(registry.get("task.queue.new").gauge().value()).isZero();
             assertThat(registry.get("task.queue.oldest.ready.age").timeGauge()
@@ -760,10 +711,8 @@ class TaskPostgresTest {
                 assertThat(registry.get("task.queue.new").gauge().value()).isEqualTo(4);
                 assertThat(registry.get("task.queue.oldest.ready.age").timeGauge()
                     .value(TimeUnit.SECONDS)).isEqualTo(30);
-                ArgumentCaptor<String> metricsSql = ArgumentCaptor.forClass(String.class);
-                verify(observedJdbc, times(2)).queryForMap(metricsSql.capture());
                 String plan = String.join("\n", jdbcTemplate.queryForList(
-                    "EXPLAIN (ANALYZE, BUFFERS) " + metricsSql.getValue(), String.class));
+                    "EXPLAIN (ANALYZE, BUFFERS) " + metricsSql, String.class));
                 assertThat(plan).contains("idx_tasks_new_id").doesNotContain("Seq Scan on tasks");
             });
         } finally {

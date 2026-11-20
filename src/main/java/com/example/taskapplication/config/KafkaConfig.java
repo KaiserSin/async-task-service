@@ -4,6 +4,7 @@ import com.example.taskapplication.dto.TaskRequestDTO;
 import com.example.taskapplication.exception.InvalidTaskMessageException;
 import com.example.taskapplication.service.database.DatabaseFailureClassifier;
 import jakarta.validation.ConstraintViolationException;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.TopicPartition;
@@ -40,6 +41,7 @@ import java.util.UUID;
 
 @Configuration
 @EnableKafka
+@Slf4j
 @EnableConfigurationProperties({KafkaProperties.class, KafkaListenerProperties.class})
 public class KafkaConfig {
 
@@ -103,9 +105,12 @@ public class KafkaConfig {
         DeadLetterPublishingRecoverer recoverer =
             new DeadLetterPublishingRecoverer(
                 dltKafkaTemplate,
-                (record, exception) -> new TopicPartition(
-                    record.topic() + ".DLT", -1
-                )
+                (record, exception) -> {
+                    UUID eventId = record.value() instanceof TaskRequestDTO dto ? dto.eventId() : null;
+                    log.warn("Rejected task message eventId={} topic={} partition={} offset={}",
+                        eventId, record.topic(), record.partition(), record.offset());
+                    return new TopicPartition(record.topic() + ".DLT", -1);
+                }
             );
         recoverer.setFailIfSendResultIsError(true);
         recoverer.setWaitForSendResultTimeout(Duration.ofSeconds(10));

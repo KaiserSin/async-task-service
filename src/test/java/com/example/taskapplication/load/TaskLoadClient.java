@@ -113,11 +113,7 @@ class TaskLoadClient implements AutoCloseable {
                 throw new IllegalStateException("Client is closed");
             }
             UUID eventId = UUID.randomUUID();
-            TaskRequestDTO dto = new TaskRequestDTO();
-            dto.setEventId(eventId);
-            dto.setOwnerUsername("alice");
-            dto.setName("Load task " + eventId);
-            dto.setDuration(duration);
+            TaskRequestDTO dto = new TaskRequestDTO(eventId, "alice", "Load task " + eventId, duration);
             long now = System.nanoTime();
             firstSend.compareAndSet(0, now);
             sentAt.put(eventId, now);

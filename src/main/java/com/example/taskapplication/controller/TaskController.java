@@ -1,6 +1,6 @@
 package com.example.taskapplication.controller;
 
-import com.example.taskapplication.dto.ErrorResponse;
+import com.example.taskapplication.dto.ApiError;
 import com.example.taskapplication.dto.TaskResponseDTO;
 import com.example.taskapplication.exception.TaskRetryNotAllowedException;
 import com.example.taskapplication.service.maintenance.TaskRetryService;
@@ -34,24 +34,26 @@ import java.util.UUID;
 @ApiResponses({
     @ApiResponse(responseCode = "401", description = "Authentication is required",
         content = @Content(mediaType = "application/json",
-            schema = @Schema(implementation = ErrorResponse.class))),
+            schema = @Schema(implementation = ApiError.class))),
     @ApiResponse(responseCode = "403", description = "Access denied or CSRF token missing or invalid",
         content = @Content(mediaType = "application/json",
-            schema = @Schema(implementation = ErrorResponse.class))),
+            schema = @Schema(implementation = ApiError.class))),
     @ApiResponse(responseCode = "400", description = "Invalid ID",
         content = @Content(mediaType = "application/json",
-            schema = @Schema(implementation = ErrorResponse.class))),
+            schema = @Schema(implementation = ApiError.class))),
     @ApiResponse(responseCode = "404", description = "Task not found",
         content = @Content(mediaType = "application/json",
-            schema = @Schema(implementation = ErrorResponse.class))),
+            schema = @Schema(implementation = ApiError.class))),
     @ApiResponse(responseCode = "503", description = "Database is not available",
         content = @Content(mediaType = "application/json",
-            schema = @Schema(implementation = ErrorResponse.class))),
+            schema = @Schema(implementation = ApiError.class))),
     @ApiResponse(responseCode = "500", description = "Internal server error",
         content = @Content(mediaType = "application/json",
-            schema = @Schema(implementation = ErrorResponse.class)))
+            schema = @Schema(implementation = ApiError.class)))
 })
 public class TaskController {
+
+    private static final String INVALID_TASK_ID_MESSAGE = "Task ID must be a whole number greater than 0";
 
     private final TaskQueryService taskQueryService;
     private final TaskRetryService taskRetryService;
@@ -62,7 +64,7 @@ public class TaskController {
         content = @Content(mediaType = "application/json",
             schema = @Schema(implementation = TaskResponseDTO.class)))
     public ResponseEntity<TaskResponseDTO> getTask(
-        @PathVariable("id") @Positive Long id
+        @PathVariable("id") @Positive(message = INVALID_TASK_ID_MESSAGE) Long id
     ) {
         return ResponseEntity.ok()
             .cacheControl(CacheControl.noStore())
@@ -96,9 +98,11 @@ public class TaskController {
         @ApiResponse(responseCode = "204", description = "Task queued for retry", content = @Content),
         @ApiResponse(responseCode = "409", description = "Task is not FAILED",
             content = @Content(mediaType = "application/json",
-                schema = @Schema(implementation = ErrorResponse.class)))
+                schema = @Schema(implementation = ApiError.class)))
     })
-    public ResponseEntity<Void> retryTask(@PathVariable("id") @Positive Long id) {
+    public ResponseEntity<Void> retryTask(
+        @PathVariable("id") @Positive(message = INVALID_TASK_ID_MESSAGE) Long id
+    ) {
         if (!taskRetryService.retryFailedTask(id)) {
             throw new TaskRetryNotAllowedException(id);
         }

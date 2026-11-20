@@ -1,5 +1,8 @@
 package com.example.taskapplication.metrics;
 
+import com.example.taskapplication.repository.TaskRepository;
+import com.example.taskapplication.repository.TaskRepository.QueueStats;
+import com.example.taskapplication.repository.TaskRepository.RecoveryCounts;
 import com.example.taskapplication.service.execution.WorkerLifecycle;
 import com.example.taskapplication.service.maintenance.MaintenanceScheduler;
 import com.example.taskapplication.service.maintenance.TaskCleanupService;
@@ -12,22 +15,20 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class TaskMetricsTest {
 
     @Mock
-    private JdbcTemplate jdbcTemplate;
+    private TaskRepository taskRepository;
 
     private SimpleMeterRegistry registry;
     private TaskMetrics metrics;
@@ -35,7 +36,7 @@ class TaskMetricsTest {
     @BeforeEach
     void setUp() {
         registry = new SimpleMeterRegistry();
-        metrics = new TaskMetrics(registry, jdbcTemplate);
+        metrics = new TaskMetrics(registry, taskRepository);
     }
 
     @AfterEach
@@ -46,20 +47,22 @@ class TaskMetricsTest {
     @Test
     void readsQueue() {
         assertThat(registry.get("task.queue.new").gauge().value()).isNaN();
-        when(jdbcTemplate.queryForMap(anyString()))
-            .thenReturn(Map.of("new_tasks", 4L, "oldest_ready_age", 30));
+        when(taskRepository.readQueueStats())
+            .thenReturn(new QueueStats(4, 30));
 
         metrics.updateQueueMetrics();
 
         assertThat(registry.get("task.queue.new").gauge().value()).isEqualTo(4);
         assertThat(registry.get("task.queue.oldest.ready.age").timeGauge()
             .value(TimeUnit.SECONDS)).isEqualTo(30);
+        verify(taskRepository).readQueueStats();
+        verifyNoMoreInteractions(taskRepository);
     }
 
     @Test
     void clearsStaleQueueValues() {
-        when(jdbcTemplate.queryForMap(anyString()))
-            .thenReturn(Map.of("new_tasks", 4L, "oldest_ready_age", 30))
+        when(taskRepository.readQueueStats())
+            .thenReturn(new QueueStats(4, 30))
             .thenThrow(new DataAccessResourceFailureException("Database is not available"));
         metrics.updateQueueMetrics();
 
@@ -105,8 +108,7 @@ class TaskMetricsTest {
     void countsRecoveryRetriesAndTerminalFailuresOnlyAfterSuccessfulReturn() {
         TaskRecoveryService recovery = mock(TaskRecoveryService.class);
         when(recovery.recoverExpiredTasks())
-            .thenReturn(List.of(Map.of("status", "NEW"), Map.of("status", "FAILED"),
-                Map.of("status", "FAILED")))
+            .thenReturn(new RecoveryCounts(1, 2))
             .thenThrow(new DataAccessResourceFailureException("Commit failed"));
         MaintenanceScheduler scheduler = new MaintenanceScheduler(
             mock(WorkerLifecycle.class), recovery, mock(TaskCleanupService.class), metrics

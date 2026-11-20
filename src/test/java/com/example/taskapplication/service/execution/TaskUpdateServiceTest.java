@@ -9,8 +9,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.EnumSource;
-import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -53,14 +51,14 @@ class TaskUpdateServiceTest {
     @DisplayName("Accepts both intermediate progress boundaries and passes the execution owner")
     void updateProgressAcceptsBoundaries(int progress) {
         when(taskRepository.updateProgress(
-            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), progress, TIMING.leaseSeconds()
+            TASK_ID, EXECUTION_ID, progress, TIMING.leaseSeconds()
         )).thenReturn(1);
 
         boolean updated = taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, progress);
 
         assertThat(updated).isTrue();
         verify(taskRepository).updateProgress(
-            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), progress, TIMING.leaseSeconds()
+            TASK_ID, EXECUTION_ID, progress, TIMING.leaseSeconds()
         );
     }
 
@@ -68,7 +66,7 @@ class TaskUpdateServiceTest {
     @DisplayName("Returns false when the progress update affects no rows")
     void updateProgressReturnsFalseWhenNothingWasUpdated() {
         when(taskRepository.updateProgress(
-            TASK_ID, EXECUTION_ID, TaskStatus.IN_PROGRESS.name(), 40, TIMING.leaseSeconds()
+            TASK_ID, EXECUTION_ID, 40, TIMING.leaseSeconds()
         )).thenReturn(0);
 
         assertThat(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40)).isFalse();
@@ -88,9 +86,9 @@ class TaskUpdateServiceTest {
     @ParameterizedTest
     @ValueSource(ints = {-1, 101})
     @DisplayName("Rejects invalid failed-attempt progress before accessing the database")
-    void failTaskAttemptRejectsInvalidProgress(int progress) {
+    void failRejectsInvalidProgress(int progress) {
         assertThatIllegalArgumentException()
-            .isThrownBy(() -> taskUpdateService.failTaskAttempt(
+            .isThrownBy(() -> taskUpdateService.fail(
                 TASK_ID, EXECUTION_ID, progress, "Task failed"
             ));
 
@@ -106,14 +104,14 @@ class TaskUpdateServiceTest {
         "42, 42, "
     })
     @DisplayName("Returns the saved retry or terminal status, or no result for a stale attempt")
-    void failTaskAttemptPreservesOwnerAndNormalizesProgress(
+    void failPreservesOwnerAndNormalizesProgress(
         int progress, int expectedProgress, TaskStatus expectedStatus
     ) {
         when(taskRepository.failExecution(TASK_ID, EXECUTION_ID, expectedProgress, "Task failed",
             TIMING.retryBackoffSeconds()))
             .thenReturn(Optional.ofNullable(expectedStatus).map(TaskStatus::name));
 
-        assertThat(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, progress, "Task failed"))
+        assertThat(taskUpdateService.fail(TASK_ID, EXECUTION_ID, progress, "Task failed"))
             .isEqualTo(Optional.ofNullable(expectedStatus));
 
         verify(taskRepository).failExecution(TASK_ID, EXECUTION_ID, expectedProgress, "Task failed",
@@ -131,60 +129,20 @@ class TaskUpdateServiceTest {
         verifyNoInteractions(taskRepository);
     }
 
-    @ParameterizedTest
-    @EnumSource(value = TaskStatus.class, names = {"NEW", "IN_PROGRESS"})
-    @NullSource
-    @DisplayName("Accepts only COMPLETED and FAILED as final statuses")
-    void updateTaskStatusRejectsNonFinalStatus(TaskStatus status) {
-        assertThatIllegalArgumentException()
-            .isThrownBy(() -> taskUpdateService.updateTaskStatus(
-                TASK_ID, EXECUTION_ID, status, 40, "Result"
-            ))
-            .withMessage("Task status must be COMPLETED or FAILED");
-
-        verifyNoInteractions(taskRepository);
-    }
-
-    @ParameterizedTest
-    @ValueSource(ints = {-1, 101})
-    @DisplayName("Rejects invalid final progress before accessing the database")
-    void updateTaskStatusRejectsInvalidProgress(int progress) {
-        assertThatIllegalArgumentException()
-            .isThrownBy(() -> taskUpdateService.updateTaskStatus(
-                TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, progress, "Result"
-            ))
-            .withMessage("Progress must be between 0 and 100");
-
-        verifyNoInteractions(taskRepository);
-    }
-
-    @ParameterizedTest
-    @CsvSource({
-        "COMPLETED, 0, 100",
-        "COMPLETED, 99, 100",
-        "COMPLETED, 100, 100",
-        "FAILED, 0, 0",
-        "FAILED, 42, 42",
-        "FAILED, 99, 99",
-        "FAILED, 100, 99"
-    })
-    @DisplayName("Normalizes final progress and preserves identifiers and the result")
-    void updateTaskStatusNormalizesProgress(TaskStatus status, int progress, int expectedProgress) {
+    @Test
+    @DisplayName("Completes the execution owner with its result and finish time")
+    void completePreservesOwnerResultAndFinishTime() {
         String result = "Execution result";
-        when(taskRepository.finishExecution(
-            eq(TASK_ID), eq(EXECUTION_ID), eq(TaskStatus.IN_PROGRESS.name()), eq(status.name()),
-            eq(expectedProgress), eq(result), any(Instant.class)
+        when(taskRepository.completeExecution(
+            eq(TASK_ID), eq(EXECUTION_ID), eq(result), any(Instant.class)
         )).thenReturn(1);
 
-        boolean updated = taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, status, progress, result
-        );
+        boolean updated = taskUpdateService.complete(TASK_ID, EXECUTION_ID, result);
 
         ArgumentCaptor<Instant> finishedAt = ArgumentCaptor.forClass(Instant.class);
         assertThat(updated).isTrue();
-        verify(taskRepository).finishExecution(
-            eq(TASK_ID), eq(EXECUTION_ID), eq(TaskStatus.IN_PROGRESS.name()), eq(status.name()),
-            eq(expectedProgress), eq(result), finishedAt.capture()
+        verify(taskRepository).completeExecution(
+            eq(TASK_ID), eq(EXECUTION_ID), eq(result), finishedAt.capture()
         );
         assertThat(finishedAt.getValue()).isNotNull();
     }
@@ -192,14 +150,11 @@ class TaskUpdateServiceTest {
     @ParameterizedTest
     @CsvSource({"0, false", "1, true"})
     @DisplayName("Returns the completion outcome based on the number of updated rows")
-    void updateTaskStatusReturnsRepositoryOutcome(int updatedRows, boolean expected) {
-        when(taskRepository.finishExecution(
-            eq(TASK_ID), eq(EXECUTION_ID), eq(TaskStatus.IN_PROGRESS.name()),
-            eq(TaskStatus.COMPLETED.name()), eq(100), eq("Done"), any(Instant.class)
+    void completeReturnsRepositoryOutcome(int updatedRows, boolean expected) {
+        when(taskRepository.completeExecution(
+            eq(TASK_ID), eq(EXECUTION_ID), eq("Done"), any(Instant.class)
         )).thenReturn(updatedRows);
 
-        assertThat(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 80, "Done"
-        )).isEqualTo(expected);
+        assertThat(taskUpdateService.complete(TASK_ID, EXECUTION_ID, "Done")).isEqualTo(expected);
     }
 }

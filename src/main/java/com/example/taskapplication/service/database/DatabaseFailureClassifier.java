@@ -1,6 +1,7 @@
 package com.example.taskapplication.service.database;
 
 import jakarta.persistence.PersistenceException;
+import org.hibernate.TransactionException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.RecoverableDataAccessException;
@@ -36,14 +37,17 @@ public class DatabaseFailureClassifier {
     private static final Set<String> RETRYABLE_SQL_STATES = Set.of("25006", "40001", "40P01", "55P03");
 
     public Action classify(Throwable failure) {
+        return decide(collectEvidence(failure));
+    }
+
+    private FailureEvidence collectEvidence(Throwable failure) {
         Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         Deque<Throwable> pending = new ArrayDeque<>();
         Set<String> sqlStates = new HashSet<>();
         pending.add(failure);
 
         boolean databaseFailure = false;
-        boolean retryableWithoutCode = false;
-        boolean networkFailure = false;
+        boolean retryableCause = false;
         boolean jdbcTransactionFailure = false;
 
         while (!pending.isEmpty()) {
@@ -52,61 +56,46 @@ public class DatabaseFailureClassifier {
                 continue;
             }
 
-            switch (cause) {
-                case SQLTransientException sql -> {
-                    databaseFailure = true;
-                    retryableWithoutCode = true;
-                    collectSqlDetails(sql, sqlStates, pending);
-                }
-                case SQLRecoverableException sql -> {
-                    databaseFailure = true;
-                    retryableWithoutCode = true;
-                    collectSqlDetails(sql, sqlStates, pending);
-                }
-                case SQLException sql -> {
-                    databaseFailure = true;
-                    collectSqlDetails(sql, sqlStates, pending);
-                }
-                case TransientDataAccessException ignored -> {
-                    databaseFailure = true;
-                    retryableWithoutCode = true;
-                }
-                case RecoverableDataAccessException ignored -> {
-                    databaseFailure = true;
-                    retryableWithoutCode = true;
-                }
-                case DataAccessResourceFailureException ignored -> {
-                    databaseFailure = true;
-                    retryableWithoutCode = true;
-                }
-                case DataAccessException ignored -> databaseFailure = true;
-                case org.hibernate.TransactionException transaction -> {
-                    databaseFailure = true;
-                    jdbcTransactionFailure |= transaction.getCause() instanceof SQLException;
-                }
-                case PersistenceException ignored -> databaseFailure = true;
-                case CannotCreateTransactionException ignored -> {
-                    databaseFailure = true;
-                    retryableWithoutCode = true;
-                }
-                case ConnectException ignored -> networkFailure = true;
-                case SocketTimeoutException ignored -> networkFailure = true;
-                case UnknownHostException ignored -> networkFailure = true;
-                case SSLException ignored -> networkFailure = true;
-                default -> {
-                }
+            if (cause instanceof SQLException sql) {
+                collectSqlDetails(sql, sqlStates, pending);
             }
-            if (cause.getCause() != null) {
-                pending.addLast(cause.getCause());
+            databaseFailure |= cause instanceof SQLException
+                || cause instanceof DataAccessException
+                || cause instanceof PersistenceException
+                || cause instanceof CannotCreateTransactionException;
+            retryableCause |= isRetryableCause(cause);
+
+            Throwable nestedCause = cause.getCause();
+            jdbcTransactionFailure |= cause instanceof TransactionException
+                && nestedCause instanceof SQLException;
+            if (nestedCause != null) {
+                pending.addLast(nestedCause);
             }
         }
 
-        if (!databaseFailure) {
+        return new FailureEvidence(sqlStates, databaseFailure, retryableCause, jdbcTransactionFailure);
+    }
+
+    private boolean isRetryableCause(Throwable cause) {
+        return cause instanceof SQLTransientException
+            || cause instanceof SQLRecoverableException
+            || cause instanceof TransientDataAccessException
+            || cause instanceof RecoverableDataAccessException
+            || cause instanceof DataAccessResourceFailureException
+            || cause instanceof CannotCreateTransactionException
+            || cause instanceof ConnectException
+            || cause instanceof SocketTimeoutException
+            || cause instanceof UnknownHostException
+            || cause instanceof SSLException;
+    }
+
+    private Action decide(FailureEvidence evidence) {
+        if (!evidence.databaseFailure()) {
             return Action.NOT_DATABASE;
         }
         boolean dataFailure = false;
-        boolean retryableSqlState = false;
-        for (String sqlState : sqlStates) {
+        boolean retryable = evidence.retryableCause();
+        for (String sqlState : evidence.sqlStates()) {
             if (sqlState.startsWith("22") || sqlState.startsWith("23")) {
                 dataFailure = true;
                 continue;
@@ -116,21 +105,29 @@ public class DatabaseFailureClassifier {
             if (!RETRYABLE_SQL_STATES.contains(sqlState) && !retryableClass) {
                 return Action.STOP;
             }
-            retryableSqlState = true;
+            retryable = true;
         }
 
         // Infrastructure failures take precedence over a bad record in a SQL exception chain.
-        if (retryableSqlState || retryableWithoutCode || networkFailure) {
+        if (retryable) {
             return Action.RETRY;
         }
         if (dataFailure) {
             return Action.RECOVER;
         }
         // A failed JDBC rollback can mask the original connection error and its SQLState.
-        if (jdbcTransactionFailure && sqlStates.isEmpty()) {
+        if (evidence.jdbcTransactionFailure() && evidence.sqlStates().isEmpty()) {
             return Action.RETRY;
         }
         return Action.STOP;
+    }
+
+    private record FailureEvidence(
+        Set<String> sqlStates,
+        boolean databaseFailure,
+        boolean retryableCause,
+        boolean jdbcTransactionFailure
+    ) {
     }
 
     private void collectSqlDetails(

@@ -1,6 +1,7 @@
 package com.example.taskapplication.controller;
 
 import com.example.taskapplication.config.SecurityConfig;
+import com.example.taskapplication.dto.TaskRequestDTO;
 import com.example.taskapplication.exception.GlobalExceptionHandler;
 import com.example.taskapplication.model.Task;
 import com.example.taskapplication.model.TaskFixtures;
@@ -12,6 +13,8 @@ import com.example.taskapplication.service.maintenance.TaskRetryService;
 import com.example.taskapplication.service.security.TaskAccessService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.Validation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -128,6 +131,16 @@ class TaskApiTest {
     void rejectsId(String id) throws Exception {
         assertError(getJson("/api/tasks/" + id, 400), "INVALID_ARGUMENT",
             "Task ID must be a whole number greater than 0");
+    }
+
+    @Test
+    void reportsConstraintViolationForAnotherField() throws Exception {
+        try (var validatorFactory = Validation.buildDefaultValidatorFactory()) {
+            var violations = validatorFactory.getValidator().validateValue(TaskRequestDTO.class, "name", "");
+            doThrow(new ConstraintViolationException(violations)).when(taskQueryService).findById(1L);
+
+            assertError(getJson("/api/tasks/1", 400), "INVALID_ARGUMENT", "Task name is required");
+        }
     }
 
     @ParameterizedTest

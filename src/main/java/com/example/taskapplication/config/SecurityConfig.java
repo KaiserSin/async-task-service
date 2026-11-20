@@ -1,6 +1,6 @@
 package com.example.taskapplication.config;
 
-import com.example.taskapplication.dto.ErrorResponse;
+import com.example.taskapplication.dto.ApiError;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.enums.SecuritySchemeType;
 import io.swagger.v3.oas.annotations.security.SecurityScheme;
@@ -83,6 +83,6 @@ public class SecurityConfig {
         response.setStatus(status);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
         response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
-        mapper.writeValue(response.getOutputStream(), new ErrorResponse(code, message));
+        mapper.writeValue(response.getOutputStream(), new ApiError(code, message));
     }
 }

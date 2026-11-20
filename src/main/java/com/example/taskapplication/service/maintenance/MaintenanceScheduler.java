@@ -1,7 +1,6 @@
 package com.example.taskapplication.service.maintenance;
 
 import com.example.taskapplication.metrics.TaskMetrics;
-import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.service.execution.WorkerLifecycle;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,15 +26,9 @@ public class MaintenanceScheduler {
         }
 
         try {
-            var tasks = taskRecoveryService.recoverExpiredTasks();
-            long recovered = tasks.stream()
-                .filter(task -> TaskStatus.NEW.name().equals(task.get("status")))
-                .count();
-            long failed = tasks.stream()
-                .filter(task -> TaskStatus.FAILED.name().equals(task.get("status")))
-                .count();
-            taskMetrics.recordRecovered(recovered);
-            taskMetrics.recordFailed(failed);
+            var counts = taskRecoveryService.recoverExpiredTasks();
+            taskMetrics.recordRecovered(counts.requeued());
+            taskMetrics.recordFailed(counts.failed());
         } catch (RuntimeException e) {
             log.error("Could not recover tasks with expired leases", e);
         }

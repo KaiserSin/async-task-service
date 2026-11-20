@@ -2,6 +2,7 @@ package com.example.taskapplication.config;
 
 import com.example.taskapplication.dto.TaskRequestDTO;
 import com.example.taskapplication.service.database.DatabaseFailureClassifier;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.config.SaslConfigs;
@@ -121,12 +122,17 @@ class KafkaConfigTest {
             assertThat(producer.transactionCapable()).isTrue();
             assertThat(producer.getTransactionIdPrefix()).startsWith("task-");
 
-            var task = new TaskRequestDTO();
-            task.setEventId(UUID.randomUUID());
-            task.setOwnerUsername("alice");
-            task.setName("configured Kafka");
-            task.setDuration(1000L);
+            var task = new TaskRequestDTO(UUID.randomUUID(), "alice", "configured Kafka", 1000L);
             var json = producer.getValueSerializer().serialize("tasks.DLT", task);
+            var mapper = new ObjectMapper();
+            assertThat(mapper.readTree(json)).isEqualTo(mapper.readTree("""
+                {
+                  "eventId": "%s",
+                  "ownerUsername": "alice",
+                  "name": "configured Kafka",
+                  "duration": 1000
+                }
+                """.formatted(task.eventId())));
             assertThat(consumer.getValueDeserializer().deserialize("tasks", json)).isEqualTo(task);
 
             var invalidJson = new byte[] {0, 1, 2};

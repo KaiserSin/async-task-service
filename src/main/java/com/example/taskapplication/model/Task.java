@@ -40,10 +40,10 @@ public class Task {
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
-    private TaskStatus status = TaskStatus.NEW;
+    private TaskStatus status;
 
     @Column(nullable = false)
-    private Integer progress = 0;
+    private Integer progress;
 
     @Column(columnDefinition = "text")
     private String result;
@@ -58,13 +58,13 @@ public class Task {
     private Instant nextRetryAt;
 
     @Column(nullable = false)
-    private Integer attempts = 0;
+    private Integer attempts;
 
     @Column(name = "max_attempts", nullable = false)
-    private Integer maxAttempts = 3;
+    private Integer maxAttempts;
 
     @Column(name = "created_at", nullable = false, updatable = false)
-    private Instant createdAt = Instant.now();
+    private Instant createdAt;
 
     @Column(name = "started_at")
     private Instant startedAt;

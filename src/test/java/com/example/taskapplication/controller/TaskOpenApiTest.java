@@ -64,7 +64,7 @@ class TaskOpenApiTest {
             for (String code : List.of("200", "400", "401", "403", "404", "503", "500")) {
                 JsonNode response = operation.path("responses").path(code);
                 assertThat(response.path("description").asText()).isNotBlank();
-                String model = code.equals("200") ? "TaskResponseDTO" : "ErrorResponse";
+                String model = code.equals("200") ? "TaskResponseDTO" : "ApiError";
                 assertThat(response.path("content").path("application/json")
                     .path("schema").path("$ref").asText())
                     .isEqualTo("#/components/schemas/" + model);
@@ -86,7 +86,7 @@ class TaskOpenApiTest {
         assertThat(retry.path("responses").path("204").path("content").isMissingNode()).isTrue();
         for (String code : List.of("400", "401", "403", "404", "409", "503", "500")) {
             assertThat(retry.path("responses").path(code).path("content").path("application/json")
-                .path("schema").path("$ref").asText()).isEqualTo("#/components/schemas/ErrorResponse");
+                .path("schema").path("$ref").asText()).isEqualTo("#/components/schemas/ApiError");
         }
 
         JsonNode id = parameter(document, "/api/tasks/{id}", "id");
@@ -137,7 +137,7 @@ class TaskOpenApiTest {
             assertThat(field.path("nullable").asBoolean() || hasType(field, "null")).as(name).isTrue();
         }
 
-        JsonNode errorSchema = document.path("components").path("schemas").path("ErrorResponse");
+        JsonNode errorSchema = document.path("components").path("schemas").path("ApiError");
         assertThat(fields(errorSchema.path("properties"))).containsExactlyInAnyOrder("code", "message");
         assertThat(texts(errorSchema.path("required"))).containsExactlyInAnyOrder("code", "message");
         assertThat(hasType(errorSchema.path("properties").path("code"), "string")).isTrue();

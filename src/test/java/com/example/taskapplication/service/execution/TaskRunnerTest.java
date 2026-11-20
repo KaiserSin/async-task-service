@@ -80,8 +80,8 @@ class TaskRunnerTest {
         TaskRun run = taskRun(2500);
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40)).thenReturn(true);
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 80)).thenReturn(true);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenReturn(true);
 
         taskRunner.executeTask(run);
@@ -92,8 +92,8 @@ class TaskRunnerTest {
         order.verify(taskHandler).handleStep(same(run), eq(1000L), eq(1000L));
         order.verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 80);
         order.verify(taskHandler).handleStep(same(run), eq(2000L), eq(500L));
-        order.verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        order.verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         order.verify(taskMetrics).recordCompleted();
         verify(taskMetrics, never()).recordFailed(anyLong());
@@ -105,8 +105,8 @@ class TaskRunnerTest {
     void limitsIntermediateProgressTo99() throws InterruptedException {
         TaskRun run = taskRun(1001);
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 99)).thenReturn(true);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenReturn(true);
 
         taskRunner.executeTask(run);
@@ -114,8 +114,8 @@ class TaskRunnerTest {
         verify(taskHandler).handleStep(same(run), eq(0L), eq(1000L));
         verify(taskHandler).handleStep(same(run), eq(1000L), eq(1L));
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 99);
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         verifyNoMoreInteractions(taskUpdateService);
     }
@@ -124,15 +124,15 @@ class TaskRunnerTest {
     @DisplayName("A short task saves only its final result")
     void completesShortTaskWithoutIntermediateProgress() throws InterruptedException {
         TaskRun run = taskRun(500);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenReturn(true);
 
         taskRunner.executeTask(run);
 
         verify(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(500L));
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         verifyNoMoreInteractions(taskUpdateService);
     }
@@ -158,8 +158,8 @@ class TaskRunnerTest {
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40))
             .thenThrow(new DataAccessResourceFailureException("Database is not available"));
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 80)).thenReturn(true);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenReturn(true);
 
         assertThatCode(() -> taskRunner.executeTask(run)).doesNotThrowAnyException();
@@ -167,8 +167,8 @@ class TaskRunnerTest {
         verify(taskHandler, times(3)).handleStep(any(TaskRun.class), anyLong(), anyLong());
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 80);
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         verify(taskMetrics, never()).recordResultSaveError();
         verifyNoMoreInteractions(taskUpdateService);
@@ -181,8 +181,8 @@ class TaskRunnerTest {
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40))
             .thenThrow(new CannotCreateTransactionException("Failed to start the transaction"));
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 80)).thenReturn(true);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenReturn(true);
 
         assertThatCode(() -> taskRunner.executeTask(run)).doesNotThrowAnyException();
@@ -190,8 +190,8 @@ class TaskRunnerTest {
         verify(taskHandler, times(3)).handleStep(any(TaskRun.class), anyLong(), anyLong());
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 80);
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         verifyNoMoreInteractions(taskUpdateService);
     }
@@ -277,16 +277,16 @@ class TaskRunnerTest {
             return null;
         }).when(taskHandler).handleStep(any(TaskRun.class), anyLong(), anyLong());
         when(taskUpdateService.updateProgress(eq(TASK_ID), eq(EXECUTION_ID), anyInt())).thenReturn(true);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenReturn(true);
 
         taskRunner.executeTask(taskRun(60_000));
 
         verify(taskHandler, times(60)).handleStep(any(TaskRun.class), anyLong(), eq(1000L));
         verify(taskUpdateService, times(59)).updateProgress(eq(TASK_ID), eq(EXECUTION_ID), anyInt());
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         verifyNoMoreInteractions(taskUpdateService);
     }
@@ -388,7 +388,7 @@ class TaskRunnerTest {
         doNothing().doThrow(new IllegalStateException("Step failed"))
             .when(taskHandler).handleStep(any(TaskRun.class), anyLong(), anyLong());
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40)).thenReturn(true);
-        when(taskUpdateService.failTaskAttempt(
+        when(taskUpdateService.fail(
             TASK_ID, EXECUTION_ID, 40, "Task failed"
         )).thenReturn(Optional.of(TaskStatus.NEW));
 
@@ -396,7 +396,7 @@ class TaskRunnerTest {
 
         verify(taskHandler, times(2)).handleStep(any(TaskRun.class), anyLong(), eq(1000L));
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
-        verify(taskUpdateService).failTaskAttempt(
+        verify(taskUpdateService).fail(
             TASK_ID, EXECUTION_ID, 40, "Task failed"
         );
         verifyNoMoreInteractions(taskUpdateService);
@@ -409,13 +409,13 @@ class TaskRunnerTest {
         TaskRun run = taskRun(500);
         doThrow(new DataAccessResourceFailureException("Handler database is unavailable"))
             .when(taskHandler).handleStep(same(run), eq(0L), eq(500L));
-        when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
+        when(taskUpdateService.fail(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenReturn(Optional.of(TaskStatus.NEW));
 
         taskRunner.executeTask(run);
 
         verify(taskHandler).handleStep(same(run), eq(0L), eq(500L));
-        verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
+        verify(taskUpdateService).fail(TASK_ID, EXECUTION_ID, 0, "Task failed");
         verify(taskMetrics, never()).recordResultSaveError();
         verifyNoMoreInteractions(taskHandler, taskUpdateService);
         assertNoTerminalResultRecorded();
@@ -426,12 +426,12 @@ class TaskRunnerTest {
     void doesNotMarkFailedWhenAttemptFailureCannotBeSaved() throws InterruptedException {
         doThrow(new IllegalStateException("Step failed"))
             .when(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(500L));
-        when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
+        when(taskUpdateService.fail(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenThrow(new DataAccessResourceFailureException("Failed to save the attempt"));
 
         assertThatCode(() -> taskRunner.executeTask(taskRun(500))).doesNotThrowAnyException();
 
-        verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
+        verify(taskUpdateService).fail(TASK_ID, EXECUTION_ID, 0, "Task failed");
         verify(taskMetrics).recordResultSaveError();
         verifyNoMoreInteractions(taskUpdateService);
         assertNoTerminalResultRecorded();
@@ -442,12 +442,12 @@ class TaskRunnerTest {
     void doesNotRetryRejectedAttemptFailure() throws InterruptedException {
         doThrow(new IllegalStateException("Step failed"))
             .when(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(500L));
-        when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
+        when(taskUpdateService.fail(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenReturn(Optional.empty());
 
         taskRunner.executeTask(taskRun(500));
 
-        verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
+        verify(taskUpdateService).fail(TASK_ID, EXECUTION_ID, 0, "Task failed");
         verify(taskMetrics, never()).recordResultSaveError();
         verifyNoMoreInteractions(taskUpdateService);
         assertNoTerminalResultRecorded();
@@ -457,14 +457,14 @@ class TaskRunnerTest {
     @DisplayName("An error saving COMPLETED does not trigger a FAILED update")
     void doesNotMarkFailedWhenCompletionCannotBeSaved() throws InterruptedException {
         TaskRun run = taskRun(500);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenThrow(new DataAccessResourceFailureException("Failed to save the result"));
 
         assertThatCode(() -> taskRunner.executeTask(run)).doesNotThrowAnyException();
 
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         verify(taskMetrics).recordResultSaveError();
         verifyNoMoreInteractions(taskUpdateService);
@@ -475,14 +475,14 @@ class TaskRunnerTest {
     @DisplayName("A rejected final result is not saved again with a different status")
     void doesNotRetryRejectedCompletion() throws InterruptedException {
         TaskRun run = taskRun(500);
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenReturn(false);
 
         taskRunner.executeTask(run);
 
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         verify(taskMetrics, never()).recordResultSaveError();
         verifyNoMoreInteractions(taskUpdateService);
@@ -553,13 +553,13 @@ class TaskRunnerTest {
         TaskRun run = taskRun(500);
         doThrow(new IllegalStateException("Step failed"))
             .when(taskHandler).handleStep(same(run), eq(0L), eq(500L));
-        when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
+        when(taskUpdateService.fail(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenReturn(Optional.of(TaskStatus.FAILED));
 
         taskRunner.executeTask(run);
 
         InOrder order = inOrder(taskUpdateService, taskMetrics);
-        order.verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
+        order.verify(taskUpdateService).fail(TASK_ID, EXECUTION_ID, 0, "Task failed");
         order.verify(taskMetrics).recordFailed(1);
         verify(taskMetrics, never()).recordCompleted();
         verify(taskMetrics, never()).recordResultSaveError();
@@ -569,14 +569,14 @@ class TaskRunnerTest {
     @Test
     @DisplayName("A failed completion commit does not increment either terminal counter")
     void doesNotCountCompletionWhenCommitFails() {
-        when(taskUpdateService.updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        when(taskUpdateService.complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         )).thenThrow(new TransactionSystemException("Commit failed"));
 
         assertThatCode(() -> taskRunner.executeTask(taskRun(500))).doesNotThrowAnyException();
 
-        verify(taskUpdateService).updateTaskStatus(
-            TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
+        verify(taskUpdateService).complete(
+            TASK_ID, EXECUTION_ID, "Task completed"
         );
         verify(taskMetrics).recordResultSaveError();
         assertNoTerminalResultRecorded();
@@ -588,12 +588,12 @@ class TaskRunnerTest {
     void doesNotCountFailureWhenCommitFails() throws InterruptedException {
         doThrow(new IllegalStateException("Step failed"))
             .when(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(500L));
-        when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
+        when(taskUpdateService.fail(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenThrow(new TransactionSystemException("Commit failed"));
 
         assertThatCode(() -> taskRunner.executeTask(taskRun(500))).doesNotThrowAnyException();
 
-        verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
+        verify(taskUpdateService).fail(TASK_ID, EXECUTION_ID, 0, "Task failed");
         verify(taskMetrics).recordResultSaveError();
         assertNoTerminalResultRecorded();
         verifyNoMoreInteractions(taskUpdateService);

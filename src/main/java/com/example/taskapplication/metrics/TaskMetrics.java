@@ -1,5 +1,6 @@
 package com.example.taskapplication.metrics;
 
+import com.example.taskapplication.repository.TaskRepository;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -7,7 +8,6 @@ import io.micrometer.core.instrument.TimeGauge;
 import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class TaskMetrics {
 
-    private final JdbcTemplate jdbcTemplate;
+    private final TaskRepository taskRepository;
     private final Timer executionDuration;
     private final Counter recoveredTasks;
     private final Counter completedTasks;
@@ -27,8 +27,8 @@ public class TaskMetrics {
     private volatile double newTasks = Double.NaN;
     private volatile double oldestReadyAgeSeconds = Double.NaN;
 
-    public TaskMetrics(MeterRegistry registry, JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = jdbcTemplate;
+    public TaskMetrics(MeterRegistry registry, TaskRepository taskRepository) {
+        this.taskRepository = taskRepository;
 
         Gauge.builder("task.queue.new", this, metrics -> metrics.newTasks)
             .description("Tasks waiting in NEW status")
@@ -67,31 +67,9 @@ public class TaskMetrics {
     @Scheduled(fixedDelayString = "${worker.metrics-delay-ms:60000}")
     public void updateQueueMetrics() {
         try {
-            var row = jdbcTemplate.queryForMap("""
-                SELECT
-                    COUNT(*) AS new_tasks,
-                    COALESCE(
-                        EXTRACT(EPOCH FROM (
-                            CURRENT_TIMESTAMP -
-                            MIN(created_at) FILTER (
-                                WHERE attempts < max_attempts
-                                  AND (
-                                      next_retry_at IS NULL
-                                      OR next_retry_at <= CURRENT_TIMESTAMP
-                                  )
-                            )
-                        )),
-                        0
-                    ) AS oldest_ready_age
-                FROM tasks
-                WHERE status = 'NEW'
-                """);
-
-            newTasks = ((Number) row.get("new_tasks")).doubleValue();
-            oldestReadyAgeSeconds = Math.max(
-                0,
-                ((Number) row.get("oldest_ready_age")).doubleValue()
-            );
+            var stats = taskRepository.readQueueStats();
+            newTasks = stats.newTasks();
+            oldestReadyAgeSeconds = Math.max(0, stats.oldestReadyAgeSeconds());
         } catch (DataAccessException e) {
             newTasks = Double.NaN;
             oldestReadyAgeSeconds = Double.NaN;

@@ -6,28 +6,26 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
-import lombok.Data;
 
 import java.util.UUID;
 
-@Data
-public class TaskRequestDTO {
-
+public record TaskRequestDTO(
     @NotNull(message = "Event ID is required")
-    private UUID eventId;
+    UUID eventId,
 
     @NotBlank(message = "Task owner is required")
     @Size(max = 255, message = "Task owner must be 255 characters or fewer")
     @Pattern(regexp = "[^\\p{Cc}]*", message = "Task owner must not contain control characters")
-    private String ownerUsername;
+    String ownerUsername,
 
     @NotBlank(message = "Task name is required")
     @Size(max = 255, message = "Task name must be 255 characters or fewer")
     @Pattern(regexp = "[^\\p{Cc}]*", message = "Task name must not contain control characters")
-    private String name;
+    String name,
 
     @NotNull(message = "Duration is required")
     @Positive(message = "Duration must be greater than 0")
     @Max(value = 60_000, message = "Duration must be 60 seconds or less")
-    private Long duration;
+    Long duration
+) {
 }

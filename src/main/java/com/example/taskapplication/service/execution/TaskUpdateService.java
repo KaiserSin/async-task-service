@@ -9,8 +9,8 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.util.UUID;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -25,7 +25,7 @@ public class TaskUpdateService {
             throw new IllegalArgumentException("Progress must be between 0 and 99 while a task is running");
         }
         return taskRepository.updateProgress(
-            id, executionId, TaskStatus.IN_PROGRESS.name(), progress, workerProperties.leaseSeconds()
+            id, executionId, progress, workerProperties.leaseSeconds()
         ) == 1;
     }
 
@@ -35,7 +35,7 @@ public class TaskUpdateService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public Optional<TaskStatus> failTaskAttempt(Long id, UUID executionId, int progress, String result) {
+    public Optional<TaskStatus> fail(Long id, UUID executionId, int progress, String result) {
         if (progress < 0 || progress > 100) {
             throw new IllegalArgumentException("Progress must be between 0 and 100");
         }
@@ -45,24 +45,7 @@ public class TaskUpdateService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public boolean updateTaskStatus(
-        Long id,
-        UUID executionId,
-        TaskStatus newStatus,
-        int progress,
-        String result
-    ) {
-        if (newStatus != TaskStatus.COMPLETED && newStatus != TaskStatus.FAILED) {
-            throw new IllegalArgumentException("Task status must be COMPLETED or FAILED");
-        }
-        if (progress < 0 || progress > 100) {
-            throw new IllegalArgumentException("Progress must be between 0 and 100");
-        }
-
-        int finalProgress = newStatus == TaskStatus.COMPLETED ? 100 : Math.min(progress, 99);
-        return taskRepository.finishExecution(
-            id, executionId, TaskStatus.IN_PROGRESS.name(), newStatus.name(),
-            finalProgress, result, Instant.now()
-        ) == 1;
+    public boolean complete(Long id, UUID executionId, String result) {
+        return taskRepository.completeExecution(id, executionId, result, Instant.now()) == 1;
     }
 }

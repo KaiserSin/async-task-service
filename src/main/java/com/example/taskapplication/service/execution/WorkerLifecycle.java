@@ -1,56 +1,77 @@
 package com.example.taskapplication.service.execution;
 
 import com.example.taskapplication.config.WorkerProperties;
-import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.event.ContextClosedEvent;
-import org.springframework.context.event.EventListener;
-import org.springframework.core.Ordered;
-import org.springframework.core.annotation.Order;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 @Component
 @Slf4j
-@RequiredArgsConstructor
-public class WorkerLifecycle {
+public class WorkerLifecycle implements SmartLifecycle {
 
     private final ThreadPoolExecutor taskExecutor;
     private final KafkaListenerEndpointRegistry kafkaListenerEndpointRegistry;
-
     private final WorkerProperties workerProperties;
+    private final Semaphore workerSlots;
 
-    private volatile boolean stopping;
+    private volatile boolean running;
+
+    public WorkerLifecycle(
+        ThreadPoolExecutor taskExecutor,
+        KafkaListenerEndpointRegistry kafkaListenerEndpointRegistry,
+        WorkerProperties workerProperties
+    ) {
+        this.taskExecutor = taskExecutor;
+        this.kafkaListenerEndpointRegistry = kafkaListenerEndpointRegistry;
+        this.workerProperties = workerProperties;
+        this.workerSlots = new Semaphore(workerProperties.pool().size());
+    }
+
+    @Override
+    public void start() {
+        running = !taskExecutor.isShutdown();
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running;
+    }
 
     public boolean isStopping() {
-        return stopping;
+        return !isRunning();
     }
 
     public void startWorker(Runnable worker) {
-        if (stopping || taskExecutor.isShutdown()) {
+        if (isStopping() || taskExecutor.isShutdown() || !workerSlots.tryAcquire()) {
             return;
         }
         try {
-            taskExecutor.execute(worker);
-        } catch (RejectedExecutionException ignored) {
-            // No executor slot: leave unclaimed tasks in the database.
+            taskExecutor.execute(() -> {
+                try {
+                    worker.run();
+                } finally {
+                    workerSlots.release();
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // Shutdown can start between the check above and submission.
+            workerSlots.release();
+            if (!taskExecutor.isShutdown()) {
+                log.error("Worker submission failed", e);
+            }
         }
     }
 
-    @EventListener(ContextClosedEvent.class)
-    @Order(Ordered.HIGHEST_PRECEDENCE)
-    @PreDestroy
-    public synchronized void shutdown() {
-        if (stopping) {
-            return;
-        }
-        stopping = true;
+    @Override
+    public void stop() {
+        running = false;
 
         long startedAt = System.nanoTime();
         var shutdown = workerProperties.shutdown();

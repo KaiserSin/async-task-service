@@ -58,12 +58,13 @@ class TaskPollerTest {
             new WorkerProperties.Cleanup(30, 90, 500));
         executor = new WorkerConfig().taskExecutor(properties);
         lifecycle = new WorkerLifecycle(executor, mock(KafkaListenerEndpointRegistry.class), properties);
+        lifecycle.start();
         poller = new TaskPoller(lifecycle, taskClaimService, taskRunner);
     }
 
     @AfterEach
     void tearDown() throws InterruptedException {
-        ReflectionTestUtils.setField(lifecycle, "stopping", true);
+        ReflectionTestUtils.setField(lifecycle, "running", false);
         releases.forEach(CountDownLatch::countDown);
         executor.shutdown();
         if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -171,7 +172,7 @@ class TaskPollerTest {
 
     @Test
     void stoppingDoesNotStartAClaim() {
-        ReflectionTestUtils.setField(lifecycle, "stopping", true);
+        lifecycle.stop();
 
         poller.processTask();
 
@@ -202,7 +203,7 @@ class TaskPollerTest {
 
         poller.processTask();
         assertThat(claimStarted.await(5, TimeUnit.SECONDS)).isTrue();
-        ReflectionTestUtils.setField(lifecycle, "stopping", true);
+        ReflectionTestUtils.setField(lifecycle, "running", false);
         releaseClaim.countDown();
 
         awaitCompletedWorkers(1);

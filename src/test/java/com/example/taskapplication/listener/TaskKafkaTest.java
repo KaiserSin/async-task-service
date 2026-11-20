@@ -34,6 +34,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,6 +42,8 @@ import org.springframework.boot.actuate.health.Status;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
@@ -187,18 +190,22 @@ class TaskKafkaTest {
 
         RecordMetadata first = send(dto);
         awaitOffset(first);
-        Task before = findTask(dto.getEventId());
+        Task before = findTask(dto.eventId());
         RecordMetadata second = send(dto);
         awaitOffset(second);
 
         assertThat(second.offset()).isGreaterThan(first.offset());
         assertThat(taskRepository.count()).isEqualTo(1);
-        Task saved = findTask(dto.getEventId());
+        Task saved = findTask(dto.eventId());
         assertThat(saved).usingRecursiveComparison().isEqualTo(before);
         assertThat(saved.getName()).isEqualTo("Task");
-        assertThat(saved.getOwnerUsername()).isEqualTo(dto.getOwnerUsername());
-        assertThat(saved.getDuration()).isEqualTo(dto.getDuration());
+        assertThat(saved.getOwnerUsername()).isEqualTo(dto.ownerUsername());
+        assertThat(saved.getDuration()).isEqualTo(dto.duration());
         assertThat(saved.getStatus()).isEqualTo(TaskStatus.NEW);
+        assertThat(saved.getProgress()).isZero();
+        assertThat(saved.getAttempts()).isZero();
+        assertThat(saved.getMaxAttempts()).isEqualTo(3);
+        assertThat(saved.getCreatedAt()).isNotNull();
         assertThat(readDlt()).isEmpty();
     }
 
@@ -227,7 +234,7 @@ class TaskKafkaTest {
         try {
             sent = send(dto);
             awaitLatch(committed);
-            id = findTask(dto.getEventId()).getId();
+            id = findTask(dto.eventId()).getId();
             assertThat(taskRepository.count()).isEqualTo(1);
             assertNotCommitted(sent);
         } finally {
@@ -242,7 +249,7 @@ class TaskKafkaTest {
             assertThat(record.offset()).isEqualTo(sent.offset());
         }
         assertThat(taskRepository.count()).isEqualTo(1);
-        assertThat(findTask(dto.getEventId()).getId()).isEqualTo(id);
+        assertThat(findTask(dto.eventId()).getId()).isEqualTo(id);
         assertThat(readDlt()).isEmpty();
     }
 
@@ -253,32 +260,31 @@ class TaskKafkaTest {
         startListener();
         TaskRequestDTO dto = request();
         awaitOffset(send(dto));
-        Task before = findTask(dto.getEventId());
-        if (field.equals("name")) {
-            dto.setName("Another task");
-        } else if (field.equals("ownerUsername")) {
-            dto.setOwnerUsername("bob");
-        } else {
-            dto.setDuration(2000L);
-        }
+        Task before = findTask(dto.eventId());
+        TaskRequestDTO changed = switch (field) {
+            case "name" -> new TaskRequestDTO(dto.eventId(), dto.ownerUsername(), "Another task", dto.duration());
+            case "ownerUsername" -> new TaskRequestDTO(dto.eventId(), "bob", dto.name(), dto.duration());
+            default -> new TaskRequestDTO(dto.eventId(), dto.ownerUsername(), dto.name(), 2000L);
+        };
 
-        RecordMetadata sent = send(dto);
+        RecordMetadata sent = send(changed);
         awaitOffset(sent);
 
         assertThat(taskRepository.count()).isEqualTo(1);
-        assertThat(findTask(dto.getEventId())).usingRecursiveComparison().isEqualTo(before);
+        assertThat(findTask(dto.eventId())).usingRecursiveComparison().isEqualTo(before);
         ConsumerRecord<String, byte[]> dlt = readOneDlt();
         assertThat(objectMapper.readTree(dlt.value()))
-            .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(dto)));
-        assertOrigin(dlt, sent, dto.getEventId().toString());
+            .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(changed)));
+        assertOrigin(dlt, sent, dto.eventId().toString());
+        assertThat(new String(dlt.headers().lastHeader(KafkaHeaders.DLT_EXCEPTION_MESSAGE).value(),
+            StandardCharsets.UTF_8)).contains("eventId=" + dto.eventId(), "is already used with different values");
     }
 
     @Test
     @DisplayName("A DTO with an invalid duration is sent to DLT as JSON")
     void sendsInvalidTask() throws Exception {
         startListener();
-        TaskRequestDTO dto = request();
-        dto.setDuration(0L);
+        TaskRequestDTO dto = request("alice", "  Task  ", 0L);
 
         RecordMetadata sent = send(dto);
         awaitOffset(sent);
@@ -287,15 +293,14 @@ class TaskKafkaTest {
         ConsumerRecord<String, byte[]> dlt = readOneDlt();
         assertThat(objectMapper.readTree(dlt.value()))
             .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(dto)));
-        assertOrigin(dlt, sent, dto.getEventId().toString());
+        assertOrigin(dlt, sent, dto.eventId().toString());
     }
 
     @Test
     @DisplayName("A message without an owner is sent to DLT without registering an unowned task")
     void rejectsMessageWithoutOwner() throws Exception {
         startListener();
-        TaskRequestDTO dto = request();
-        dto.setOwnerUsername(null);
+        TaskRequestDTO dto = request(null, "  Task  ", 1000L);
 
         RecordMetadata sent = send(dto);
         awaitOffset(sent);
@@ -304,15 +309,15 @@ class TaskKafkaTest {
         ConsumerRecord<String, byte[]> dlt = readOneDlt();
         assertThat(objectMapper.readTree(dlt.value()))
             .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(dto)));
-        assertOrigin(dlt, sent, dto.getEventId().toString());
+        assertOrigin(dlt, sent, dto.eventId().toString());
     }
 
     @Test
-    @DisplayName("A name with NUL is sent to DLT and the next task is processed")
-    void rejectsNulWithoutStoppingListener() throws Exception {
+    @ExtendWith(OutputCaptureExtension.class)
+    @DisplayName("A name with NUL is logged and sent to DLT and the next task is processed")
+    void rejectsNulWithoutStoppingListener(CapturedOutput output) throws Exception {
         startListener();
-        TaskRequestDTO invalid = request();
-        invalid.setName("Task\u0000name");
+        TaskRequestDTO invalid = request("alice", "Task\u0000name", 1000L);
 
         RecordMetadata rejected = send(invalid);
         awaitOffset(rejected);
@@ -321,13 +326,15 @@ class TaskKafkaTest {
 
         assertThat(container.isRunning()).isTrue();
         assertThat(taskRepository.count()).isEqualTo(1);
-        assertThat(findTask(valid.getEventId()).getName()).isEqualTo("Task");
+        assertThat(findTask(valid.eventId()).getName()).isEqualTo("Task");
         ConsumerRecord<String, byte[]> dlt = readOneDlt();
         assertThat(objectMapper.readTree(dlt.value()))
             .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(invalid)));
-        assertOrigin(dlt, rejected, invalid.getEventId().toString());
+        assertOrigin(dlt, rejected, invalid.eventId().toString());
         assertThat(new String(dlt.headers().lastHeader(KafkaHeaders.DLT_EXCEPTION_MESSAGE).value(),
-            StandardCharsets.UTF_8)).contains("Task name must not contain control characters");
+            StandardCharsets.UTF_8)).contains("eventId=" + invalid.eventId(), "Task name must not contain control characters");
+        assertThat(output.getAll()).contains("Rejected task message eventId=%s topic=%s partition=%d offset=%d"
+            .formatted(invalid.eventId(), rejected.topic(), rejected.partition(), rejected.offset()));
     }
 
     @ParameterizedTest
@@ -341,12 +348,9 @@ class TaskKafkaTest {
             deliveries.incrementAndGet();
             taskRegistrationService.register(record.value());
         });
-        TaskRequestDTO invalid = request();
-        if (field.equals("name")) {
-            invalid.setName("Task\u0000name");
-        } else {
-            invalid.setDuration(0L);
-        }
+        TaskRequestDTO invalid = field.equals("name")
+            ? request("alice", "Task\u0000name", 1000L)
+            : request("alice", "  Task  ", 0L);
 
         RecordMetadata rejected = send(invalid);
         awaitOffset(rejected);
@@ -356,11 +360,11 @@ class TaskKafkaTest {
         assertThat(deliveries).hasValue(2);
         assertThat(container.isRunning()).isTrue();
         assertThat(taskRepository.count()).isEqualTo(1);
-        assertThat(findTask(valid.getEventId()).getName()).isEqualTo("Task");
+        assertThat(findTask(valid.eventId()).getName()).isEqualTo("Task");
         ConsumerRecord<String, byte[]> dlt = readOneDlt();
         assertThat(objectMapper.readTree(dlt.value()))
             .isEqualTo(objectMapper.readTree(objectMapper.writeValueAsBytes(invalid)));
-        assertOrigin(dlt, rejected, invalid.getEventId().toString());
+        assertOrigin(dlt, rejected, invalid.eventId().toString());
     }
 
     @Test
@@ -370,9 +374,8 @@ class TaskKafkaTest {
         createTopic(topic, 3);
         createTopic(topic + ".DLT");
         listen(taskListener::receive, 3);
-        TaskRequestDTO invalid = request();
-        invalid.setDuration(0L);
-        String key = invalid.getEventId().toString();
+        TaskRequestDTO invalid = request("alice", "  Task  ", 0L);
+        String key = invalid.eventId().toString();
 
         RecordMetadata rejected = send(2, key, objectMapper.writeValueAsBytes(invalid));
         awaitOffset(rejected);
@@ -385,8 +388,8 @@ class TaskKafkaTest {
         assertThat(taskRepository.count()).isZero();
 
         TaskRequestDTO valid = request();
-        awaitOffset(send(2, valid.getEventId().toString(), objectMapper.writeValueAsBytes(valid)));
-        assertThat(findTask(valid.getEventId()).getName()).isEqualTo("Task");
+        awaitOffset(send(2, valid.eventId().toString(), objectMapper.writeValueAsBytes(valid)));
+        assertThat(findTask(valid.eventId()).getName()).isEqualTo("Task");
         assertThat(container.isRunning()).isTrue();
         assertThat(readDlt()).hasSize(1);
     }
@@ -460,10 +463,10 @@ class TaskKafkaTest {
                         INSERT INTO tasks (event_id, name, duration, owner_username)
                         VALUES (?, ?, ?, ?)
                         """)) {
-                        statement.setObject(1, record.value().getEventId());
-                        statement.setString(2, record.value().getName());
-                        statement.setLong(3, record.value().getDuration());
-                        statement.setString(4, record.value().getOwnerUsername());
+                        statement.setObject(1, record.value().eventId());
+                        statement.setString(2, record.value().name());
+                        statement.setLong(3, record.value().duration());
+                        statement.setString(4, record.value().ownerUsername());
                         statement.executeUpdate();
                     } finally {
                         connection.rollback();
@@ -510,10 +513,10 @@ class TaskKafkaTest {
 
             assertThat(container.isRunning()).isTrue();
             assertThat(taskRepository.count()).isEqualTo(2);
-            assertThat(findTask(first.getEventId()).getName()).isEqualTo("Task");
-            assertThat(findTask(next.getEventId()).getName()).isEqualTo("Task");
+            assertThat(findTask(first.eventId()).getName()).isEqualTo("Task");
+            assertThat(findTask(next.eventId()).getName()).isEqualTo("Task");
             List<ConsumerRecord<String, TaskRequestDTO>> redelivered = deliveries.stream()
-                .filter(record -> first.getEventId().equals(record.value().getEventId()))
+                .filter(record -> first.eventId().equals(record.value().eventId()))
                 .toList();
             assertThat(redelivered).hasSizeGreaterThanOrEqualTo(2);
             assertThat(redelivered).allSatisfy(record -> {
@@ -527,12 +530,11 @@ class TaskKafkaTest {
     }
 
     private TaskRequestDTO request() {
-        TaskRequestDTO dto = new TaskRequestDTO();
-        dto.setEventId(UUID.randomUUID());
-        dto.setOwnerUsername("alice");
-        dto.setName("  Task  ");
-        dto.setDuration(1000L);
-        return dto;
+        return request("alice", "  Task  ", 1000L);
+    }
+
+    private TaskRequestDTO request(String ownerUsername, String name, Long duration) {
+        return new TaskRequestDTO(UUID.randomUUID(), ownerUsername, name, duration);
     }
 
     private Task findTask(UUID eventId) {
@@ -571,7 +573,7 @@ class TaskKafkaTest {
     }
 
     private RecordMetadata send(TaskRequestDTO dto) throws Exception {
-        return send(dto.getEventId().toString(), objectMapper.writeValueAsBytes(dto));
+        return send(dto.eventId().toString(), objectMapper.writeValueAsBytes(dto));
     }
 
     private RecordMetadata send(String key, byte[] value) throws Exception {

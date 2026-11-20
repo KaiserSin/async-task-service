@@ -12,6 +12,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 import java.util.Set;
+import java.util.stream.Collectors;
 
 @Component
 @RequiredArgsConstructor
@@ -27,16 +28,22 @@ public class TaskListener {
     public void receive(ConsumerRecord<String, TaskRequestDTO> record) {
         TaskRequestDTO dto = record.value();
         if (dto == null) {
-            throw new InvalidTaskMessageException("Message has no task");
+            throw new InvalidTaskMessageException("Message has no task (eventId=null)");
         }
 
         Set<ConstraintViolation<TaskRequestDTO>> violations = validator.validate(dto);
         if (!violations.isEmpty()) {
-            throw new ConstraintViolationException(violations);
+            String details = violations.stream()
+                .map(violation -> violation.getPropertyPath() + ": " + violation.getMessage())
+                .sorted()
+                .collect(Collectors.joining(", "));
+            throw new ConstraintViolationException(
+                "Task message validation failed for eventId=" + dto.eventId() + " (" + details + ")", violations
+            );
         }
 
-        if (record.key() != null && !record.key().equals(dto.getEventId().toString())) {
-            throw new InvalidTaskMessageException("Kafka key does not match eventId");
+        if (record.key() != null && !record.key().equals(dto.eventId().toString())) {
+            throw new InvalidTaskMessageException("Kafka key does not match eventId=" + dto.eventId());
         }
 
         taskRegistrationService.register(dto);

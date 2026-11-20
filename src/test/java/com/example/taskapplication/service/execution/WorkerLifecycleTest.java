@@ -5,10 +5,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
-import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.listener.MessageListenerContainer;
 
@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -50,6 +51,7 @@ class WorkerLifecycleTest {
     @BeforeEach
     void setUp() {
         lifecycle = new WorkerLifecycle(executor, listeners, properties);
+        lifecycle.start();
     }
 
     @AfterEach
@@ -58,13 +60,12 @@ class WorkerLifecycleTest {
     }
 
     @Test
-    void gracefulShutdownIsIdempotentAndRejectsNewWorkers() throws Exception {
+    void gracefulStopRejectsNewWorkers() throws Exception {
         when(listeners.getListenerContainers()).thenReturn(List.of());
         when(executor.awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS))).thenReturn(true);
         Runnable newWorker = mock(Runnable.class);
 
-        lifecycle.shutdown();
-        lifecycle.shutdown();
+        lifecycle.stop();
         lifecycle.startWorker(newWorker);
 
         assertThat(lifecycle.isStopping()).isTrue();
@@ -86,12 +87,14 @@ class WorkerLifecycleTest {
         }).when(listeners).stop(any(Runnable.class));
         when(executor.awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS))).thenReturn(true);
 
-        lifecycle.shutdown();
+        Runnable callback = mock(Runnable.class);
+        lifecycle.stop(callback);
 
-        var order = inOrder(executor, listeners);
+        var order = inOrder(executor, listeners, callback);
         order.verify(executor).shutdown();
         order.verify(listeners).stop(any(Runnable.class));
         order.verify(executor).awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS));
+        order.verify(callback).run();
         verify(executor, never()).shutdownNow();
     }
 
@@ -100,7 +103,7 @@ class WorkerLifecycleTest {
         when(listeners.getListenerContainers()).thenReturn(List.of());
         when(executor.awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS))).thenReturn(false, true);
 
-        lifecycle.shutdown();
+        lifecycle.stop();
 
         var order = inOrder(executor);
         order.verify(executor).shutdown();
@@ -116,7 +119,7 @@ class WorkerLifecycleTest {
         when(executor.awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS)))
             .thenThrow(new InterruptedException("Interrupted shutdown"));
 
-        lifecycle.shutdown();
+        lifecycle.stop();
 
         assertThat(Thread.currentThread().isInterrupted()).isTrue();
         assertThat(lifecycle.isStopping()).isTrue();
@@ -128,7 +131,7 @@ class WorkerLifecycleTest {
     void interruptsWorkersIfListenerShutdownFails() {
         when(listeners.getListenerContainers()).thenThrow(new IllegalStateException("Registry unavailable"));
 
-        assertThatCode(lifecycle::shutdown).doesNotThrowAnyException();
+        assertThatCode(lifecycle::stop).doesNotThrowAnyException();
 
         assertThat(lifecycle.isStopping()).isTrue();
         verify(executor).shutdown();
@@ -136,18 +139,39 @@ class WorkerLifecycleTest {
     }
 
     @Test
-    void rejectedWorkerIsNotRunByTheCallingThread() {
+    void fullPoolSkipsSubmissionAndWorkerFailureFreesSlot() {
+        int poolSize = properties.pool().size();
+        Runnable worker = () -> {
+            throw new IllegalStateException("Worker failed");
+        };
+
+        for (int i = 0; i < poolSize + 1; i++) {
+            lifecycle.startWorker(worker);
+        }
+
+        var submissions = ArgumentCaptor.forClass(Runnable.class);
+        verify(executor, times(poolSize)).execute(submissions.capture());
+        assertThatThrownBy(submissions.getValue()::run).isInstanceOf(IllegalStateException.class);
+
+        lifecycle.startWorker(mock(Runnable.class));
+
+        verify(executor, times(poolSize + 1)).execute(any(Runnable.class));
+    }
+
+    @Test
+    void shutdownDuringSubmissionDoesNotRunWorkerOnTheCallingThread() {
         Runnable worker = mock(Runnable.class);
-        doThrow(new RejectedExecutionException("Pool full")).when(executor).execute(worker);
+        when(executor.isShutdown()).thenReturn(false, true);
+        doThrow(new RejectedExecutionException("Executor shut down")).when(executor).execute(any(Runnable.class));
 
         assertThatCode(() -> lifecycle.startWorker(worker)).doesNotThrowAnyException();
 
-        verify(executor).execute(worker);
+        verify(executor).execute(any(Runnable.class));
         verifyNoInteractions(worker);
     }
 
     @Test
-    void contextClosedEventAndBeanDestructionStopThePoolOnlyOnce() throws Exception {
+    void springStartsWorkerAndStopsPoolOnlyOnce() throws Exception {
         when(listeners.getListenerContainers()).thenReturn(List.of());
         when(executor.awaitTermination(anyLong(), eq(TimeUnit.NANOSECONDS))).thenReturn(true);
         WorkerLifecycle registered;
@@ -160,7 +184,8 @@ class WorkerLifecycleTest {
             context.refresh();
             registered = context.getBean(WorkerLifecycle.class);
 
-            context.publishEvent(new ContextClosedEvent(context));
+            assertThat(registered.isRunning()).isTrue();
+            context.stop();
 
             assertThat(registered.isStopping()).isTrue();
             verify(executor).shutdown();

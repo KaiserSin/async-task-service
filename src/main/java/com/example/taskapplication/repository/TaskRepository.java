@@ -1,39 +1,18 @@
 package com.example.taskapplication.repository;
 
 import com.example.taskapplication.model.Task;
-import com.example.taskapplication.model.TaskStatus;
-import jakarta.persistence.LockModeType;
-import jakarta.persistence.QueryHint;
-import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 @Repository
 public interface TaskRepository extends JpaRepository<Task, Long> {
-
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "-2"))
-    @Query("""
-        SELECT t FROM Task t
-        WHERE t.status = :status
-          AND (t.nextRetryAt IS NULL OR t.nextRetryAt <= CURRENT_TIMESTAMP)
-          AND t.attempts < t.maxAttempts
-        ORDER BY t.id
-        """)
-    List<Task> findAndLockNewTasks(
-        @Param("status") TaskStatus status,
-        Pageable pageable
-    );
 
     @Query(value = """
         WITH picked AS (
@@ -74,8 +53,12 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
 
     Optional<Task> findByEventId(UUID eventId);
 
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("SELECT t FROM Task t WHERE t.id = :id")
+    @Query(value = """
+        SELECT *
+        FROM tasks
+        WHERE id = :id
+        FOR NO KEY UPDATE
+        """, nativeQuery = true)
     Optional<Task> findByIdForUpdate(@Param("id") Long id);
 
     @Modifying(flushAutomatically = true, clearAutomatically = true)
@@ -99,14 +82,13 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
             version = version + 1
         WHERE id = :id
           AND execution_id = :executionId
-          AND status = :runningStatus
+          AND status = 'IN_PROGRESS'
           AND lease_until > CURRENT_TIMESTAMP
           AND progress <= :progress
         """, nativeQuery = true)
     int updateProgress(
         @Param("id") Long id,
         @Param("executionId") UUID executionId,
-        @Param("runningStatus") String runningStatus,
         @Param("progress") int progress,
         @Param("leaseSeconds") int leaseSeconds
     );
@@ -184,8 +166,8 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """
         UPDATE tasks
-        SET status = :newStatus,
-            progress = :progress,
+        SET status = 'COMPLETED',
+            progress = 100,
             result = :result,
             finished_at = :finishedAt,
             lease_until = NULL,
@@ -193,18 +175,90 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
             version = version + 1
         WHERE id = :id
           AND execution_id = :executionId
-          AND status = :runningStatus
+          AND status = 'IN_PROGRESS'
           AND lease_until > CURRENT_TIMESTAMP
         """, nativeQuery = true)
-    int finishExecution(
+    int completeExecution(
         @Param("id") Long id,
         @Param("executionId") UUID executionId,
-        @Param("runningStatus") String runningStatus,
-        @Param("newStatus") String newStatus,
-        @Param("progress") int progress,
         @Param("result") String result,
         @Param("finishedAt") Instant finishedAt
     );
+
+    @Query(value = """
+        SELECT
+            COUNT(*) AS new_tasks,
+            CAST(COALESCE(
+                EXTRACT(EPOCH FROM (
+                    CURRENT_TIMESTAMP -
+                    MIN(created_at) FILTER (
+                        WHERE attempts < max_attempts
+                          AND (
+                              next_retry_at IS NULL
+                              OR next_retry_at <= CURRENT_TIMESTAMP
+                          )
+                    )
+                )),
+                0
+            ) AS double precision) AS oldest_ready_age_seconds
+        FROM tasks
+        WHERE status = 'NEW'
+        """, nativeQuery = true)
+    QueueStats readQueueStats();
+
+    record QueueStats(long newTasks, double oldestReadyAgeSeconds) {
+    }
+
+    @Query(value = """
+        WITH expired AS (
+            SELECT id
+            FROM tasks
+            WHERE status = 'IN_PROGRESS'
+              AND lease_until < CURRENT_TIMESTAMP
+            ORDER BY lease_until, id
+            LIMIT 100
+            FOR UPDATE SKIP LOCKED
+        ), updated AS (
+            UPDATE tasks t
+            SET status = CASE
+                    WHEN t.attempts < t.max_attempts THEN 'NEW'
+                    ELSE 'FAILED'
+                END,
+                execution_id = NULL,
+                lease_until = NULL,
+                next_retry_at = CASE
+                    WHEN t.attempts < t.max_attempts
+                        THEN CURRENT_TIMESTAMP + (:retryBackoffSeconds * INTERVAL '1 second')
+                    ELSE NULL
+                END,
+                started_at = CASE
+                    WHEN t.attempts < t.max_attempts THEN NULL
+                    ELSE t.started_at
+                END,
+                finished_at = CASE
+                    WHEN t.attempts >= t.max_attempts THEN CURRENT_TIMESTAMP
+                    ELSE NULL
+                END,
+                progress = CASE
+                    WHEN t.attempts < t.max_attempts THEN 0
+                    ELSE t.progress
+                END,
+                result = 'Task lease expired',
+                version = t.version + 1
+            FROM expired e
+            WHERE t.id = e.id
+              AND t.status = 'IN_PROGRESS'
+              AND t.lease_until < CURRENT_TIMESTAMP
+            RETURNING t.status
+        )
+        SELECT COUNT(*) FILTER (WHERE status = 'NEW') AS requeued,
+               COUNT(*) FILTER (WHERE status = 'FAILED') AS failed
+        FROM updated
+        """, nativeQuery = true)
+    RecoveryCounts recoverExpiredExecutions(@Param("retryBackoffSeconds") int retryBackoffSeconds);
+
+    record RecoveryCounts(long requeued, long failed) {
+    }
 
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query(value = """

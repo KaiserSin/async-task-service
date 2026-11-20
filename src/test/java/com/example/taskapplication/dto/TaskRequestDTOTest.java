@@ -20,6 +20,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class TaskRequestDTOTest {
 
+    private static final UUID EVENT_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
+
     private static ValidatorFactory validatorFactory;
     private static Validator validator;
 
@@ -38,8 +40,7 @@ class TaskRequestDTOTest {
     @ValueSource(longs = {1, 60_000})
     @DisplayName("Accepts the minimum and maximum duration")
     void acceptsDurationBoundaries(long duration) {
-        TaskRequestDTO dto = validRequest();
-        dto.setDuration(duration);
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, "alice", "My task", duration);
 
         var violations = validator.validate(dto);
 
@@ -49,8 +50,7 @@ class TaskRequestDTOTest {
     @Test
     @DisplayName("Accepts a name with 255 characters")
     void acceptsNameWithMaximumLength() {
-        TaskRequestDTO dto = validRequest();
-        dto.setName("a".repeat(255));
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, "alice", "a".repeat(255), 1_000L);
 
         var violations = validator.validate(dto);
 
@@ -62,8 +62,7 @@ class TaskRequestDTOTest {
     @ValueSource(strings = {" ", "\t\n"})
     @DisplayName("Rejects a missing or blank owner")
     void rejectsMissingOwner(String ownerUsername) {
-        TaskRequestDTO dto = validRequest();
-        dto.setOwnerUsername(ownerUsername);
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, ownerUsername, "My task", 1_000L);
 
         assertThat(validator.validate(dto))
             .extracting(violation -> violation.getPropertyPath().toString())
@@ -74,8 +73,7 @@ class TaskRequestDTOTest {
     @MethodSource("controlCharacters")
     @DisplayName("Rejects control characters in the owner's identity")
     void rejectsControlCharacterInOwner(int codePoint) {
-        TaskRequestDTO dto = validRequest();
-        dto.setOwnerUsername("alice" + (char) codePoint + "smith");
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, "alice" + (char) codePoint + "smith", "My task", 1_000L);
 
         assertThat(validator.validate(dto))
             .extracting(violation -> violation.getPropertyPath().toString())
@@ -85,12 +83,11 @@ class TaskRequestDTOTest {
     @Test
     @DisplayName("Accepts the owner length limit and rejects longer identities")
     void validatesOwnerLength() {
-        TaskRequestDTO dto = validRequest();
-        dto.setOwnerUsername("a".repeat(255));
-        assertThat(validator.validate(dto)).isEmpty();
+        TaskRequestDTO maximum = new TaskRequestDTO(EVENT_ID, "a".repeat(255), "My task", 1_000L);
+        assertThat(validator.validate(maximum)).isEmpty();
 
-        dto.setOwnerUsername("a".repeat(256));
-        assertThat(validator.validate(dto))
+        TaskRequestDTO aboveMaximum = new TaskRequestDTO(EVENT_ID, "a".repeat(256), "My task", 1_000L);
+        assertThat(validator.validate(aboveMaximum))
             .extracting(violation -> violation.getPropertyPath().toString())
             .containsExactly("ownerUsername");
     }
@@ -99,8 +96,7 @@ class TaskRequestDTOTest {
     @ValueSource(strings = {"Обычная задача", "Tâche à réaliser", "任务 ✅", "Проверить 👩‍💻"})
     @DisplayName("Accepts Unicode names without control characters")
     void acceptsUnicodeName(String name) {
-        TaskRequestDTO dto = validRequest();
-        dto.setName(name);
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, "alice", name, 1_000L);
 
         assertThat(validator.validate(dto)).isEmpty();
     }
@@ -109,8 +105,7 @@ class TaskRequestDTOTest {
     @MethodSource("controlCharacters")
     @DisplayName("Rejects every Unicode control character in a name")
     void rejectsControlCharacterInName(int codePoint) {
-        TaskRequestDTO dto = validRequest();
-        dto.setName("Task" + (char) codePoint + "name");
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, "alice", "Task" + (char) codePoint + "name", 1_000L);
 
         var violations = validator.validate(dto);
 
@@ -129,8 +124,7 @@ class TaskRequestDTOTest {
     @Test
     @DisplayName("Rejects a missing event ID")
     void rejectsMissingEventId() {
-        TaskRequestDTO dto = validRequest();
-        dto.setEventId(null);
+        TaskRequestDTO dto = new TaskRequestDTO(null, "alice", "My task", 1_000L);
 
         var violations = validator.validate(dto);
 
@@ -144,8 +138,7 @@ class TaskRequestDTOTest {
     @ValueSource(strings = {" ", "   ", "\t\n"})
     @DisplayName("Rejects a missing or blank name")
     void rejectsBlankName(String name) {
-        TaskRequestDTO dto = validRequest();
-        dto.setName(name);
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, "alice", name, 1_000L);
 
         var violations = validator.validate(dto);
 
@@ -160,8 +153,7 @@ class TaskRequestDTOTest {
     @Test
     @DisplayName("Rejects a name longer than 255 characters")
     void rejectsNameAboveMaximumLength() {
-        TaskRequestDTO dto = validRequest();
-        dto.setName("a".repeat(256));
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, "alice", "a".repeat(256), 1_000L);
 
         var violations = validator.validate(dto);
 
@@ -175,22 +167,12 @@ class TaskRequestDTOTest {
     @ValueSource(longs = {0, -1, 60_001})
     @DisplayName("Rejects a missing or invalid duration")
     void rejectsInvalidDuration(Long duration) {
-        TaskRequestDTO dto = validRequest();
-        dto.setDuration(duration);
+        TaskRequestDTO dto = new TaskRequestDTO(EVENT_ID, "alice", "My task", duration);
 
         var violations = validator.validate(dto);
 
         assertThat(violations)
             .extracting(violation -> violation.getPropertyPath().toString())
             .containsExactly("duration");
-    }
-
-    private TaskRequestDTO validRequest() {
-        TaskRequestDTO dto = new TaskRequestDTO();
-        dto.setEventId(UUID.randomUUID());
-        dto.setOwnerUsername("alice");
-        dto.setName("My task");
-        dto.setDuration(1_000L);
-        return dto;
     }
 }

@@ -18,20 +18,22 @@ public class TaskRegistrationService {
 
     @Transactional
     public void register(TaskRequestDTO dto) {
-        String normalizedName = dto.getName().strip();
+        String normalizedName = dto.name().strip();
         int inserted = taskRepository.insertIfAbsent(
-            dto.getEventId(), normalizedName, dto.getDuration(), dto.getOwnerUsername()
+            dto.eventId(), normalizedName, dto.duration(), dto.ownerUsername()
         );
 
         if (inserted == 0) {
-            Task existing = taskRepository.findByEventId(dto.getEventId())
-                .orElseThrow(() -> new IllegalStateException("Event was not found"));
+            Task existing = taskRepository.findByEventId(dto.eventId())
+                .orElseThrow(() -> new IllegalStateException(
+                    "Task not found after insert conflict for eventId=" + dto.eventId()
+                ));
 
             if (!existing.getName().equals(normalizedName)
-                || !existing.getDuration().equals(dto.getDuration())
-                || !Objects.equals(existing.getOwnerUsername(), dto.getOwnerUsername())) {
+                || !existing.getDuration().equals(dto.duration())
+                || !Objects.equals(existing.getOwnerUsername(), dto.ownerUsername())) {
                 throw new InvalidTaskMessageException(
-                    "eventId is already used with different values"
+                    "eventId=" + dto.eventId() + " is already used with different values"
                 );
             }
         }

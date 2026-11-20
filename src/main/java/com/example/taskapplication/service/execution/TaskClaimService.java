@@ -1,6 +1,6 @@
 package com.example.taskapplication.service.execution;
 
-import com.example.taskapplication.config.WorkerTimingProperties;
+import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.repository.TaskRepository;
 import lombok.RequiredArgsConstructor;
@@ -16,27 +16,18 @@ public class TaskClaimService {
 
     private final TaskRepository taskRepository;
     private final TransactionTemplate claimTransactionTemplate;
-    private final WorkerTimingProperties workerTiming;
+    private final WorkerProperties workerProperties;
 
     public Optional<TaskRun> claimNextTask() {
         long claimStartedAt = nanoTime();
-        return claimTransactionTemplate.execute(transactionStatus ->
-            taskRepository.findAndLockFirstNewTask()
-                .map(task -> {
-                    UUID executionId = UUID.randomUUID();
-                    int updated = taskRepository.startExecution(
-                        task.getId(), executionId, workerTiming.leaseSeconds()
-                    );
-                    if (updated != 1) {
-                        throw new IllegalStateException("Failed to claim task " + task.getId());
-                    }
-
-                    return new TaskRun(
-                        task.getId(), task.getEventId(), executionId, task.getDuration(),
-                        claimStartedAt + workerTiming.leaseNanos()
-                    );
-                })
-        );
+        return claimTransactionTemplate.execute(transactionStatus -> {
+            UUID executionId = UUID.randomUUID();
+            return taskRepository.claimNextExecution(executionId, workerProperties.leaseSeconds())
+                .map(task -> new TaskRun(
+                    task.getId(), task.getEventId(), executionId, task.getDuration(),
+                    claimStartedAt + workerProperties.leaseNanos()
+                ));
+        });
     }
 
     long nanoTime() {

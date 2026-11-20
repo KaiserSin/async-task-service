@@ -1,8 +1,8 @@
 package com.example.taskapplication.service;
 
 import com.example.taskapplication.dto.TaskRun;
-import com.example.taskapplication.service.execution.TaskExecutionService;
-import com.example.taskapplication.service.execution.TaskStatusService;
+import com.example.taskapplication.service.execution.TaskClaimService;
+import com.example.taskapplication.service.execution.TaskRunner;
 import com.example.taskapplication.service.execution.WorkerLifecycle;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -17,8 +17,8 @@ import java.util.Optional;
 public class TaskPoller {
 
     private final WorkerLifecycle workerLifecycle;
-    private final TaskExecutionService taskExecutionService;
-    private final TaskStatusService taskStatusService;
+    private final TaskClaimService taskClaimService;
+    private final TaskRunner taskRunner;
 
     @Scheduled(fixedDelayString = "${worker.poll-delay-ms:1000}")
     public void processTask() {
@@ -28,12 +28,12 @@ public class TaskPoller {
     private void runWorker() {
         try {
             while (!workerLifecycle.isStopping() && !Thread.currentThread().isInterrupted()) {
-                Optional<TaskRun> run = taskExecutionService.claimNextTask();
+                Optional<TaskRun> run = taskClaimService.claimNextTask();
                 if (run.isEmpty()) {
                     return;
                 }
                 processTask();
-                taskStatusService.executeTask(run.get());
+                taskRunner.executeTask(run.get());
             }
         } catch (RuntimeException e) {
             log.error("Worker loop failed", e);

@@ -38,6 +38,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static com.example.taskapplication.model.TaskFixtures.task;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -296,10 +297,7 @@ class TaskRecoveryTest {
     }
 
     private Task createTask(long duration) {
-        Task task = new Task();
-        task.setEventId(UUID.randomUUID());
-        task.setName("Task");
-        task.setDuration(duration);
+        Task task = task(UUID.randomUUID(), null, "Task", duration);
         return taskRepository.saveAndFlush(task);
     }
 

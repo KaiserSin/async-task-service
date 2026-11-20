@@ -36,40 +36,41 @@ public interface TaskRepository extends JpaRepository<Task, Long> {
     );
 
     @Query(value = """
-        SELECT *
-        FROM tasks
-        WHERE status = 'NEW'
-          AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
-          AND attempts < max_attempts
-        ORDER BY id
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED
-        """, nativeQuery = true)
-    Optional<Task> findAndLockFirstNewTask();
-
-    @Modifying(flushAutomatically = true, clearAutomatically = true)
-    @Query(value = """
-        UPDATE tasks
+        WITH picked AS (
+            SELECT id
+            FROM tasks
+            WHERE status = 'NEW'
+              AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
+              AND attempts < max_attempts
+            ORDER BY id
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE tasks t
         SET status = 'IN_PROGRESS',
             execution_id = :executionId,
             lease_until = CURRENT_TIMESTAMP + (:leaseSeconds * INTERVAL '1 second'),
             next_retry_at = NULL,
-            attempts = attempts + 1,
+            attempts = t.attempts + 1,
             started_at = CURRENT_TIMESTAMP,
             finished_at = NULL,
             progress = 0,
             result = NULL,
-            version = version + 1
-        WHERE id = :id
-          AND status = 'NEW'
-          AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)
-          AND attempts < max_attempts
+            version = t.version + 1
+        FROM picked
+        WHERE t.id = picked.id
+        RETURNING t.id, t.event_id AS "eventId", t.duration
         """, nativeQuery = true)
-    int startExecution(
-        @Param("id") Long id,
+    Optional<ClaimedTask> claimNextExecution(
         @Param("executionId") UUID executionId,
         @Param("leaseSeconds") int leaseSeconds
     );
+
+    interface ClaimedTask {
+        Long getId();
+        UUID getEventId();
+        long getDuration();
+    }
 
     Optional<Task> findByEventId(UUID eventId);
 

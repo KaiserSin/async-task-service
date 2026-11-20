@@ -5,15 +5,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.validation.annotation.Validated;
 
-import java.util.concurrent.TimeUnit;
-
 @Validated
-@ConfigurationProperties("worker")
-public record WorkerTimingProperties(
-    @DefaultValue("30") @Min(1) int leaseSeconds,
-    @DefaultValue("30") @Min(0) int retryBackoffSeconds
+@ConfigurationProperties("kafka.listener")
+public record KafkaListenerProperties(
+    @DefaultValue("1") @Min(1) int concurrency,
+    @DefaultValue("10000") @Min(1) long databaseRetryDelayMs
 ) {
-    public long leaseNanos() {
-        return TimeUnit.SECONDS.toNanos(leaseSeconds);
-    }
 }

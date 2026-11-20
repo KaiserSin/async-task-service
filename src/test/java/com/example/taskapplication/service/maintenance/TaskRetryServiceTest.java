@@ -22,9 +22,11 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
+import static com.example.taskapplication.model.TaskFixtures.task;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.util.ReflectionTestUtils.setField;
 
 @ExtendWith(MockitoExtension.class)
 class TaskRetryServiceTest {
@@ -111,10 +113,8 @@ class TaskRetryServiceTest {
     @Test
     @DisplayName("A foreign task is hidden and its execution state is not reset")
     void rejectsForeignTaskWithoutChangingIt() {
-        Task task = createTask(TaskStatus.FAILED);
-        task.setOwnerUsername("another-user");
-        Task original = createTask(TaskStatus.FAILED);
-        original.setOwnerUsername("another-user");
+        Task task = createTask(TaskStatus.FAILED, "another-user");
+        Task original = createTask(TaskStatus.FAILED, "another-user");
         when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
 
         assertThatThrownBy(() -> taskRetryService.retryFailedTask(TASK_ID))
@@ -127,8 +127,7 @@ class TaskRetryServiceTest {
     @Test
     @DisplayName("A foreign non-failed task is hidden before its status is checked")
     void hidesForeignTaskBeforeCheckingStatus() {
-        Task task = createTask(TaskStatus.NEW);
-        task.setOwnerUsername("another-user");
+        Task task = createTask(TaskStatus.NEW, "another-user");
         when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
 
         assertThatThrownBy(() -> taskRetryService.retryFailedTask(TASK_ID))
@@ -138,8 +137,7 @@ class TaskRetryServiceTest {
     @Test
     @DisplayName("A user cannot retry a legacy task without an owner")
     void rejectsLegacyTaskForUser() {
-        Task task = createTask(TaskStatus.FAILED);
-        task.setOwnerUsername(null);
+        Task task = createTask(TaskStatus.FAILED, null);
         when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
 
         assertThatThrownBy(() -> taskRetryService.retryFailedTask(TASK_ID))
@@ -156,8 +154,7 @@ class TaskRetryServiceTest {
             UsernamePasswordAuthenticationToken.authenticated("admin", "unused",
                 AuthorityUtils.createAuthorityList("ROLE_ADMIN"))
         );
-        Task task = createTask(TaskStatus.FAILED);
-        task.setOwnerUsername(null);
+        Task task = createTask(TaskStatus.FAILED, null);
         when(taskRepository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
 
         assertThat(taskRetryService.retryFailedTask(TASK_ID)).isTrue();
@@ -182,24 +179,23 @@ class TaskRetryServiceTest {
     }
 
     private Task createTask(TaskStatus status) {
-        Task task = new Task();
-        task.setId(TASK_ID);
-        task.setEventId(EVENT_ID);
-        task.setOwnerUsername("user1");
-        task.setName("My task");
-        task.setDuration(2500L);
-        task.setStatus(status);
-        task.setProgress(75);
-        task.setResult("Previous result");
-        task.setExecutionId(EXECUTION_ID);
-        task.setLeaseUntil(FINISHED_AT.plusSeconds(30));
-        task.setNextRetryAt(FINISHED_AT.plusSeconds(60));
-        task.setAttempts(3);
-        task.setMaxAttempts(3);
-        task.setCreatedAt(CREATED_AT);
-        task.setStartedAt(STARTED_AT);
-        task.setFinishedAt(FINISHED_AT);
-        task.setVersion(5L);
+        return createTask(status, "user1");
+    }
+
+    private Task createTask(TaskStatus status, String ownerUsername) {
+        Task task = task(EVENT_ID, ownerUsername, "My task", 2500L);
+        setField(task, "id", TASK_ID);
+        setField(task, "status", status);
+        setField(task, "progress", 75);
+        setField(task, "result", "Previous result");
+        setField(task, "executionId", EXECUTION_ID);
+        setField(task, "leaseUntil", FINISHED_AT.plusSeconds(30));
+        setField(task, "nextRetryAt", FINISHED_AT.plusSeconds(60));
+        setField(task, "attempts", 3);
+        setField(task, "createdAt", CREATED_AT);
+        setField(task, "startedAt", STARTED_AT);
+        setField(task, "finishedAt", FINISHED_AT);
+        setField(task, "version", 5L);
         return task;
     }
 }

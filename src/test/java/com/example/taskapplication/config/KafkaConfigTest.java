@@ -8,6 +8,9 @@ import org.apache.kafka.common.config.SaslConfigs;
 import org.apache.kafka.common.config.SslConfigs;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.boot.context.properties.bind.validation.BindValidationException;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
@@ -131,6 +134,18 @@ class KafkaConfigTest {
             var headers = new RecordHeaders();
             assertThat(consumer.getValueDeserializer().deserialize("tasks", headers, invalidJson)).isNull();
             assertThat(headers.lastHeader(SerializationUtils.VALUE_DESERIALIZER_EXCEPTION_HEADER)).isNotNull();
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "kafka.listener.concurrency=0",
+        "kafka.listener.database-retry-delay-ms=0"
+    })
+    void rejectsInvalidListenerSettingsAtStartup(String property) {
+        contextRunner.withPropertyValues(property).run(context -> {
+            assertThat(context).hasFailed();
+            assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(BindValidationException.class);
         });
     }
 

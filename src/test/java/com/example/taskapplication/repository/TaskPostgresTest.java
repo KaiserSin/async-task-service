@@ -1,7 +1,7 @@
 package com.example.taskapplication.repository;
 
 import com.example.taskapplication.config.TransactionConfig;
-import com.example.taskapplication.config.WorkerTimingProperties;
+import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.metrics.TaskMetrics;
 import com.example.taskapplication.model.Task;
@@ -10,7 +10,7 @@ import com.example.taskapplication.service.maintenance.MaintenanceScheduler;
 import com.example.taskapplication.service.execution.DemoTaskHandler;
 import com.example.taskapplication.service.execution.WorkerLifecycle;
 import com.example.taskapplication.service.execution.TaskClaimService;
-import com.example.taskapplication.service.execution.TaskStatusService;
+import com.example.taskapplication.service.execution.TaskRunner;
 import com.example.taskapplication.service.execution.TaskUpdateService;
 import com.example.taskapplication.service.maintenance.TaskRecoveryService;
 import com.example.taskapplication.service.maintenance.TaskCleanupService;
@@ -38,6 +38,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -69,6 +70,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import javax.sql.DataSource;
 
+import static com.example.taskapplication.model.TaskFixtures.task;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -76,6 +78,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.util.ReflectionTestUtils.setField;
 
 @DataJpaTest(properties = {
     "spring.jpa.hibernate.ddl-auto=validate",
@@ -106,7 +109,7 @@ class TaskPostgresTest {
     private TaskRecoveryService taskRecoveryService;
 
     @Autowired
-    private WorkerTimingProperties timingProperties;
+    private WorkerProperties workerProperties;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -151,11 +154,13 @@ class TaskPostgresTest {
             """);
         Task ready = createTask();
         jdbcTemplate.execute("ANALYZE tasks");
-        String claimSql = TaskRepository.class.getMethod("findAndLockFirstNewTask")
+        String claimSql = TaskRepository.class.getMethod("claimNextExecution", UUID.class, int.class)
             .getAnnotation(org.springframework.data.jpa.repository.Query.class).value();
 
-        String plan = String.join("\n", jdbcTemplate.queryForList(
-            "EXPLAIN (ANALYZE, BUFFERS) " + claimSql, String.class));
+        String plan = String.join("\n", new NamedParameterJdbcTemplate(jdbcTemplate).queryForList(
+            "EXPLAIN " + claimSql,
+            Map.of("executionId", UUID.randomUUID(), "leaseSeconds", workerProperties.leaseSeconds()),
+            String.class));
 
         assertThat(plan).contains("Index Scan using idx_tasks_new_id").doesNotContain("Sort");
         assertThat(taskClaimService.claimNextTask().orElseThrow().id()).isEqualTo(ready.getId());
@@ -164,15 +169,20 @@ class TaskPostgresTest {
     @Test
     @DisplayName("Configured lease and retry backoff reach claim, heartbeat and lease recovery SQL")
     void usesConfiguredLeaseAndRecoveryBackoff() {
-        assertThat(timingProperties.leaseSeconds()).isEqualTo(47);
-        assertThat(timingProperties.retryBackoffSeconds()).isEqualTo(7);
+        assertThat(workerProperties.leaseSeconds()).isEqualTo(47);
+        assertThat(workerProperties.retryBackoffSeconds()).isEqualTo(7);
         Task task = createTask();
         Instant claimStarted = databaseNow();
 
         TaskRun run = taskClaimService.claimNextTask().orElseThrow();
 
         Instant claimSaved = databaseNow();
-        assertThat(findTask(task.getId()).getLeaseUntil())
+        Task claimed = findTask(task.getId());
+        assertThat(run.id()).isEqualTo(claimed.getId());
+        assertThat(run.eventId()).isEqualTo(claimed.getEventId());
+        assertThat(run.executionId()).isNotNull().isEqualTo(claimed.getExecutionId());
+        assertThat(run.duration()).isEqualTo(claimed.getDuration());
+        assertThat(claimed.getLeaseUntil())
             .isBetween(claimStarted.plusSeconds(47), claimSaved.plusSeconds(47));
 
         Instant heartbeatStarted = databaseNow();
@@ -285,7 +295,7 @@ class TaskPostgresTest {
             Task oldTask = entityManager.find(Task.class, task.getId());
             loaded.countDown();
             awaitLatch(release);
-            oldTask.setName("Old change");
+            setField(oldTask, "name", "Old change");
             entityManager.flush();
         }));
 
@@ -316,7 +326,7 @@ class TaskPostgresTest {
         AtomicInteger heartbeats = new AtomicInteger();
         AtomicReference<DataAccessException> heartbeatFailure = new AtomicReference<>();
         AtomicReference<Instant> renewedLease = new AtomicReference<>();
-        TaskUpdateService updates = new TaskUpdateService(taskRepository, timingProperties) {
+        TaskUpdateService updates = new TaskUpdateService(taskRepository, workerProperties) {
             @Override
             public boolean updateProgress(Long id, UUID executionId, int progress) {
                 if (heartbeats.incrementAndGet() == 1) {
@@ -345,7 +355,7 @@ class TaskPostgresTest {
 
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
-            new TaskStatusService(updates, new TaskMetrics(registry, jdbcTemplate), new DemoTaskHandler(), timingProperties).executeTask(run);
+            new TaskRunner(updates, new TaskMetrics(registry, jdbcTemplate), new DemoTaskHandler(), workerProperties).executeTask(run);
         } finally {
             registry.close();
         }
@@ -520,8 +530,8 @@ class TaskPostgresTest {
             if (attempt < maxAttempts) {
                 assertThat(saved.getStatus()).isEqualTo(TaskStatus.NEW);
                 assertThat(saved.getNextRetryAt())
-                    .isBetween(failureStarted.plusSeconds(timingProperties.retryBackoffSeconds()),
-                        failureSaved.plusSeconds(timingProperties.retryBackoffSeconds()));
+                    .isBetween(failureStarted.plusSeconds(workerProperties.retryBackoffSeconds()),
+                        failureSaved.plusSeconds(workerProperties.retryBackoffSeconds()));
                 assertThat(saved.getProgress()).isZero();
                 assertThat(saved.getExecutionId()).isNull();
                 assertThat(saved.getStartedAt()).isNull();
@@ -561,18 +571,18 @@ class TaskPostgresTest {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
             TaskMetrics metrics = new TaskMetrics(registry, jdbcTemplate);
-            TaskStatusService statusService = new TaskStatusService(taskUpdateService, metrics,
+            TaskRunner taskRunner = new TaskRunner(taskUpdateService, metrics,
                 (claimed, elapsed, step) -> { throw new IllegalStateException("Handler failed"); },
-                timingProperties);
+                workerProperties);
 
-            statusService.executeTask(run);
+            taskRunner.executeTask(run);
 
             assertThat(findTask(task.getId()).getStatus())
                 .isEqualTo(maxAttempts == 1 ? TaskStatus.FAILED : TaskStatus.NEW);
             assertThat(registry.get("task.failed").counter().count()).isEqualTo(maxAttempts == 1 ? 1 : 0);
             assertThat(registry.get("task.completed").counter().count()).isZero();
 
-            statusService.executeTask(run);
+            taskRunner.executeTask(run);
 
             assertThat(registry.get("task.failed").counter().count()).isEqualTo(maxAttempts == 1 ? 1 : 0);
             assertThat(findTask(task.getId()).getAttempts()).isEqualTo(1);
@@ -590,11 +600,11 @@ class TaskPostgresTest {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         try {
             TaskMetrics metrics = new TaskMetrics(registry, jdbcTemplate);
-            TaskStatusService statusService = new TaskStatusService(taskUpdateService, metrics,
-                (claimed, elapsed, step) -> {}, timingProperties);
+            TaskRunner taskRunner = new TaskRunner(taskUpdateService, metrics,
+                (claimed, elapsed, step) -> {}, workerProperties);
 
-            statusService.executeTask(run);
-            statusService.executeTask(run);
+            taskRunner.executeTask(run);
+            taskRunner.executeTask(run);
 
             assertThat(findTask(task.getId()).getStatus()).isEqualTo(TaskStatus.COMPLETED);
             assertThat(registry.get("task.completed").counter().count()).isEqualTo(1);
@@ -975,20 +985,16 @@ class TaskPostgresTest {
     @Test
     @DisplayName("JPA saves and reads all fields of a completed task")
     void storesTask() {
-        Task task = new Task();
-        task.setEventId(UUID.randomUUID());
-        task.setOwnerUsername("alice");
-        task.setName("Completed task");
-        task.setDuration(60000L);
-        task.setStatus(TaskStatus.COMPLETED);
-        task.setProgress(100);
-        task.setResult("Done");
-        task.setExecutionId(UUID.randomUUID());
-        task.setAttempts(2);
-        task.setMaxAttempts(5);
-        task.setCreatedAt(Instant.parse("2026-01-01T10:00:00Z"));
-        task.setStartedAt(Instant.parse("2026-01-01T10:01:00Z"));
-        task.setFinishedAt(Instant.parse("2026-01-01T10:02:00Z"));
+        Task task = task(UUID.randomUUID(), "alice", "Completed task", 60000L);
+        setField(task, "status", TaskStatus.COMPLETED);
+        setField(task, "progress", 100);
+        setField(task, "result", "Done");
+        setField(task, "executionId", UUID.randomUUID());
+        setField(task, "attempts", 2);
+        setField(task, "maxAttempts", 5);
+        setField(task, "createdAt", Instant.parse("2026-01-01T10:00:00Z"));
+        setField(task, "startedAt", Instant.parse("2026-01-01T10:01:00Z"));
+        setField(task, "finishedAt", Instant.parse("2026-01-01T10:02:00Z"));
 
         Task saved = taskRepository.saveAndFlush(task);
 
@@ -1032,11 +1038,7 @@ class TaskPostgresTest {
     }
 
     private Task createTask() {
-        Task task = new Task();
-        task.setEventId(UUID.randomUUID());
-        task.setName("Task");
-        task.setDuration(2500L);
-        return taskRepository.saveAndFlush(task);
+        return taskRepository.saveAndFlush(task(UUID.randomUUID(), null, "Task", 2500L));
     }
 
     private Task findTask(Long id) {
@@ -1045,7 +1047,7 @@ class TaskPostgresTest {
 
     private Future<?> lockTask(Long id, CountDownLatch locked, CountDownLatch release) {
         return executor.submit(() -> transactionTemplate.executeWithoutResult(status -> {
-            Task task = taskRepository.findAndLockFirstNewTask().orElseThrow();
+            Task task = taskRepository.findByIdForUpdate(id).orElseThrow();
             assertThat(task.getId()).isEqualTo(id);
 
             locked.countDown();

@@ -100,9 +100,7 @@ class ManagementPortIsolationTest {
 
     @Test
     void taskApiStillAuthenticatesAndServesTheOwnerOnTheApplicationPort() throws Exception {
-        var task = TaskApiTest.task(TaskStatus.NEW);
-        task.setOwnerUsername("alice");
-        task = taskRepository.saveAndFlush(task);
+        var task = taskRepository.saveAndFlush(TaskApiTest.task(TaskStatus.NEW, "alice"));
         String path = "/api/tasks/" + task.getId();
 
         assertStatus(apiPort, path, null, 401);

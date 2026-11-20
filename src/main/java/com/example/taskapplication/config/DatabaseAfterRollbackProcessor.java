@@ -37,9 +37,6 @@ public class DatabaseAfterRollbackProcessor<K, V> extends DefaultAfterRollbackPr
         long retryDelayMs
     ) {
         super(recoverer, backOff, kafkaTemplate, true);
-        if (retryDelayMs < 1) {
-            throw new IllegalArgumentException("kafka.listener.database-retry-delay-ms must be greater than 0");
-        }
         this.databaseFailureClassifier = databaseFailureClassifier;
         this.pauseService = new ListenerContainerPauseService(null, taskScheduler);
         this.retryDelay = Duration.ofMillis(retryDelayMs);

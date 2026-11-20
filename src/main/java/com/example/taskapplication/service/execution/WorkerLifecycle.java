@@ -1,10 +1,9 @@
 package com.example.taskapplication.service.execution;
 
-import jakarta.annotation.PostConstruct;
+import com.example.taskapplication.config.WorkerProperties;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.Ordered;
@@ -25,20 +24,9 @@ public class WorkerLifecycle {
     private final ThreadPoolExecutor taskExecutor;
     private final KafkaListenerEndpointRegistry kafkaListenerEndpointRegistry;
 
-    @Value("${worker.shutdown.grace-period-seconds:75}")
-    private long shutdownGracePeriodSeconds;
-
-    @Value("${worker.shutdown.interrupt-wait-seconds:10}")
-    private long shutdownInterruptWaitSeconds;
+    private final WorkerProperties workerProperties;
 
     private volatile boolean stopping;
-
-    @PostConstruct
-    private void validateShutdownSettings() {
-        if (shutdownGracePeriodSeconds < 1 || shutdownInterruptWaitSeconds < 1) {
-            throw new IllegalArgumentException("Worker shutdown wait times must be greater than 0");
-        }
-    }
 
     public boolean isStopping() {
         return stopping;
@@ -65,8 +53,9 @@ public class WorkerLifecycle {
         stopping = true;
 
         long startedAt = System.nanoTime();
-        long graceDeadline = startedAt + TimeUnit.SECONDS.toNanos(shutdownGracePeriodSeconds);
-        long shutdownDeadline = graceDeadline + TimeUnit.SECONDS.toNanos(shutdownInterruptWaitSeconds);
+        var shutdown = workerProperties.shutdown();
+        long graceDeadline = startedAt + TimeUnit.SECONDS.toNanos(shutdown.gracePeriodSeconds());
+        long shutdownDeadline = graceDeadline + TimeUnit.SECONDS.toNanos(shutdown.interruptWaitSeconds());
         CountDownLatch kafkaStopped = new CountDownLatch(1);
         taskExecutor.shutdown();
 

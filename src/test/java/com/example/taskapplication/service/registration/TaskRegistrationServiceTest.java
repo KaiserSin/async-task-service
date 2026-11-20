@@ -14,6 +14,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.Optional;
 import java.util.UUID;
 
+import static com.example.taskapplication.model.TaskFixtures.task;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -79,8 +80,7 @@ class TaskRegistrationServiceTest {
     @DisplayName("Rejects a duplicate with a different name")
     void rejectsDuplicateWithDifferentName() {
         TaskRequestDTO dto = request("My task");
-        Task existing = existingTask(dto);
-        existing.setName("Another task");
+        Task existing = task(dto.getEventId(), dto.getOwnerUsername(), "Another task", dto.getDuration());
         when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
             .thenReturn(0);
         when(taskRepository.findByEventId(dto.getEventId()))
@@ -94,8 +94,7 @@ class TaskRegistrationServiceTest {
     @DisplayName("Rejects a duplicate with a different duration")
     void rejectsDuplicateWithDifferentDuration() {
         TaskRequestDTO dto = request("My task");
-        Task existing = existingTask(dto);
-        existing.setDuration(2_000L);
+        Task existing = task(dto.getEventId(), dto.getOwnerUsername(), dto.getName().strip(), 2_000L);
         when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, dto.getOwnerUsername()))
             .thenReturn(0);
         when(taskRepository.findByEventId(dto.getEventId()))
@@ -109,8 +108,7 @@ class TaskRegistrationServiceTest {
     @DisplayName("A duplicate event cannot change the task owner")
     void rejectsDuplicateWithDifferentOwner() {
         TaskRequestDTO dto = request("My task");
-        Task existing = existingTask(dto);
-        existing.setOwnerUsername("bob");
+        Task existing = task(dto.getEventId(), "bob", dto.getName().strip(), dto.getDuration());
         when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, "alice"))
             .thenReturn(0);
         when(taskRepository.findByEventId(dto.getEventId())).thenReturn(Optional.of(existing));
@@ -123,8 +121,7 @@ class TaskRegistrationServiceTest {
     @DisplayName("A new message cannot claim ownership of a legacy task")
     void rejectsDuplicateOfUnownedLegacyTask() {
         TaskRequestDTO dto = request("My task");
-        Task existing = existingTask(dto);
-        existing.setOwnerUsername(null);
+        Task existing = task(dto.getEventId(), null, dto.getName().strip(), dto.getDuration());
         when(taskRepository.insertIfAbsent(dto.getEventId(), "My task", 1_000L, "alice"))
             .thenReturn(0);
         when(taskRepository.findByEventId(dto.getEventId())).thenReturn(Optional.of(existing));
@@ -169,11 +166,6 @@ class TaskRegistrationServiceTest {
     }
 
     private Task existingTask(TaskRequestDTO dto) {
-        Task task = new Task();
-        task.setEventId(dto.getEventId());
-        task.setOwnerUsername(dto.getOwnerUsername());
-        task.setName(dto.getName().strip());
-        task.setDuration(dto.getDuration());
-        return task;
+        return task(dto.getEventId(), dto.getOwnerUsername(), dto.getName().strip(), dto.getDuration());
     }
 }

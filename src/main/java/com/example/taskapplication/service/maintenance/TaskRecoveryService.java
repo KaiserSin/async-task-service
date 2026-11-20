@@ -1,6 +1,6 @@
 package com.example.taskapplication.service.maintenance;
 
-import com.example.taskapplication.config.WorkerTimingProperties;
+import com.example.taskapplication.config.WorkerProperties;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -15,7 +15,7 @@ import java.util.Map;
 public class TaskRecoveryService {
 
     private final JdbcTemplate jdbcTemplate;
-    private final WorkerTimingProperties workerTiming;
+    private final WorkerProperties workerProperties;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public List<Map<String, Object>> recoverExpiredTasks() {
@@ -60,6 +60,6 @@ public class TaskRecoveryService {
               AND t.status = 'IN_PROGRESS'
               AND t.lease_until < CURRENT_TIMESTAMP
             RETURNING t.id, t.status
-            """, workerTiming.retryBackoffSeconds());
+            """, workerProperties.retryBackoffSeconds());
     }
 }

@@ -1,6 +1,6 @@
 package com.example.taskapplication.service.execution;
 
-import com.example.taskapplication.config.WorkerTimingProperties;
+import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.metrics.TaskMetrics;
 import com.example.taskapplication.model.TaskStatus;
@@ -43,9 +43,11 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class TaskStatusServiceTest {
+class TaskRunnerTest {
 
-    private static final WorkerTimingProperties TIMING = new WorkerTimingProperties(30, 30);
+    private static final WorkerProperties TIMING = new WorkerProperties(30, 30, 5,
+        new WorkerProperties.Pool(4), new WorkerProperties.Shutdown(75, 10),
+        new WorkerProperties.Cleanup(30, 90, 500));
 
     private static final Long TASK_ID = 1L;
     private static final UUID EVENT_ID = UUID.fromString("12345678-1234-4321-8765-123456789abc");
@@ -60,11 +62,11 @@ class TaskStatusServiceTest {
     @Mock
     private TaskHandler taskHandler;
 
-    private TaskStatusService taskStatusService;
+    private TaskRunner taskRunner;
 
     @BeforeEach
     void setUp() {
-        taskStatusService = spy(new TaskStatusService(taskUpdateService, taskMetrics, taskHandler, TIMING));
+        taskRunner = spy(new TaskRunner(taskUpdateService, taskMetrics, taskHandler, TIMING));
     }
 
     @AfterEach
@@ -82,7 +84,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenReturn(true);
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         InOrder order = inOrder(taskHandler, taskUpdateService, taskMetrics);
         order.verify(taskHandler).handleStep(same(run), eq(0L), eq(1000L));
@@ -107,7 +109,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenReturn(true);
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         verify(taskHandler).handleStep(same(run), eq(0L), eq(1000L));
         verify(taskHandler).handleStep(same(run), eq(1000L), eq(1L));
@@ -126,7 +128,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenReturn(true);
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         verify(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(500L));
         verify(taskUpdateService).updateTaskStatus(
@@ -141,7 +143,7 @@ class TaskStatusServiceTest {
         TaskRun run = taskRun(2500);
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40)).thenReturn(false);
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         verify(taskHandler, times(1)).handleStep(any(TaskRun.class), anyLong(), anyLong());
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
@@ -160,7 +162,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenReturn(true);
 
-        assertThatCode(() -> taskStatusService.executeTask(run)).doesNotThrowAnyException();
+        assertThatCode(() -> taskRunner.executeTask(run)).doesNotThrowAnyException();
 
         verify(taskHandler, times(3)).handleStep(any(TaskRun.class), anyLong(), anyLong());
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
@@ -183,7 +185,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenReturn(true);
 
-        assertThatCode(() -> taskStatusService.executeTask(run)).doesNotThrowAnyException();
+        assertThatCode(() -> taskRunner.executeTask(run)).doesNotThrowAnyException();
 
         verify(taskHandler, times(3)).handleStep(any(TaskRun.class), anyLong(), anyLong());
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
@@ -205,7 +207,7 @@ class TaskStatusServiceTest {
         when(taskUpdateService.updateProgress(eq(TASK_ID), eq(EXECUTION_ID), anyInt()))
             .thenThrow(new DataAccessResourceFailureException("Database is unavailable"));
 
-        taskStatusService.executeTask(taskRun(60_000));
+        taskRunner.executeTask(taskRun(60_000));
 
         verify(taskHandler, times(30)).handleStep(any(TaskRun.class), anyLong(), eq(1000L));
         verify(taskUpdateService, times(29)).updateProgress(eq(TASK_ID), eq(EXECUTION_ID), anyInt());
@@ -229,7 +231,7 @@ class TaskStatusServiceTest {
                 throw new DataAccessResourceFailureException("Temporary heartbeat failure");
             });
 
-        taskStatusService.executeTask(taskRun(60_000));
+        taskRunner.executeTask(taskRun(60_000));
 
         verify(taskHandler, times(50)).handleStep(any(TaskRun.class), anyLong(), eq(1000L));
         verify(taskUpdateService, times(49)).updateProgress(eq(TASK_ID), eq(EXECUTION_ID), anyInt());
@@ -239,8 +241,10 @@ class TaskStatusServiceTest {
     @Test
     @DisplayName("A heartbeat renews the lease for the configured five seconds instead of the default")
     void renewsHeartbeatWithConfiguredLease() throws InterruptedException {
-        WorkerTimingProperties timing = new WorkerTimingProperties(5, 7);
-        taskStatusService = spy(new TaskStatusService(taskUpdateService, taskMetrics, taskHandler, timing));
+        WorkerProperties timing = new WorkerProperties(5, 7, 5,
+            new WorkerProperties.Pool(4), new WorkerProperties.Shutdown(75, 10),
+            new WorkerProperties.Cleanup(30, 90, 500));
+        taskRunner = spy(new TaskRunner(taskUpdateService, taskMetrics, taskHandler, timing));
         AtomicLong clock = useClock();
         TaskRun run = new TaskRun(TASK_ID, EVENT_ID, EXECUTION_ID, 60_000,
             clock.get() + timing.leaseNanos());
@@ -256,7 +260,7 @@ class TaskStatusServiceTest {
                 throw new DataAccessResourceFailureException("Temporary heartbeat failure");
             });
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         assertThat(clock.get()).isEqualTo(TimeUnit.SECONDS.toNanos(8));
         verify(taskHandler, times(7)).handleStep(same(run), anyLong(), eq(1000L));
@@ -277,7 +281,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenReturn(true);
 
-        taskStatusService.executeTask(taskRun(60_000));
+        taskRunner.executeTask(taskRun(60_000));
 
         verify(taskHandler, times(60)).handleStep(any(TaskRun.class), anyLong(), eq(1000L));
         verify(taskUpdateService, times(59)).updateProgress(eq(TASK_ID), eq(EXECUTION_ID), anyInt());
@@ -296,7 +300,7 @@ class TaskStatusServiceTest {
             throw new CannotCreateTransactionException("Heartbeat timed out");
         });
 
-        taskStatusService.executeTask(taskRun(2500));
+        taskRunner.executeTask(taskRun(2500));
 
         verify(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(1000L));
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
@@ -313,7 +317,7 @@ class TaskStatusServiceTest {
             return true;
         });
 
-        taskStatusService.executeTask(taskRun(2500));
+        taskRunner.executeTask(taskRun(2500));
 
         verify(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(1000L));
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
@@ -326,7 +330,7 @@ class TaskStatusServiceTest {
     void doesNotStartExpiredRun() throws InterruptedException {
         AtomicLong clock = useClock();
 
-        taskStatusService.executeTask(new TaskRun(TASK_ID, EVENT_ID, EXECUTION_ID, 500, clock.get()));
+        taskRunner.executeTask(new TaskRun(TASK_ID, EVENT_ID, EXECUTION_ID, 500, clock.get()));
 
         verify(taskHandler, never()).handleStep(any(TaskRun.class), anyLong(), anyLong());
         verifyNoMoreInteractions(taskUpdateService);
@@ -342,7 +346,7 @@ class TaskStatusServiceTest {
             return null;
         }).when(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(500L));
 
-        taskStatusService.executeTask(taskRun(500));
+        taskRunner.executeTask(taskRun(500));
 
         verify(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(500L));
         verifyNoMoreInteractions(taskUpdateService);
@@ -362,7 +366,7 @@ class TaskStatusServiceTest {
         when(taskUpdateService.updateProgress(TASK_ID, EXECUTION_ID, 40))
             .thenThrow(new DataAccessResourceFailureException("Temporary heartbeat failure"));
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         verify(taskHandler).handleStep(any(TaskRun.class), eq(0L), eq(1000L));
         verify(taskHandler).handleStep(same(run), eq(1000L), eq(200L));
@@ -373,7 +377,7 @@ class TaskStatusServiceTest {
 
     private AtomicLong useClock() {
         AtomicLong clock = new AtomicLong(TimeUnit.SECONDS.toNanos(1));
-        doAnswer(invocation -> clock.get()).when(taskStatusService).nanoTime();
+        doAnswer(invocation -> clock.get()).when(taskRunner).nanoTime();
         return clock;
     }
 
@@ -388,7 +392,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, 40, "Task failed"
         )).thenReturn(Optional.of(TaskStatus.NEW));
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         verify(taskHandler, times(2)).handleStep(any(TaskRun.class), anyLong(), eq(1000L));
         verify(taskUpdateService).updateProgress(TASK_ID, EXECUTION_ID, 40);
@@ -408,7 +412,7 @@ class TaskStatusServiceTest {
         when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenReturn(Optional.of(TaskStatus.NEW));
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         verify(taskHandler).handleStep(same(run), eq(0L), eq(500L));
         verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
@@ -425,7 +429,7 @@ class TaskStatusServiceTest {
         when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenThrow(new DataAccessResourceFailureException("Failed to save the attempt"));
 
-        assertThatCode(() -> taskStatusService.executeTask(taskRun(500))).doesNotThrowAnyException();
+        assertThatCode(() -> taskRunner.executeTask(taskRun(500))).doesNotThrowAnyException();
 
         verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
         verify(taskMetrics).recordResultSaveError();
@@ -441,7 +445,7 @@ class TaskStatusServiceTest {
         when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenReturn(Optional.empty());
 
-        taskStatusService.executeTask(taskRun(500));
+        taskRunner.executeTask(taskRun(500));
 
         verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
         verify(taskMetrics, never()).recordResultSaveError();
@@ -457,7 +461,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenThrow(new DataAccessResourceFailureException("Failed to save the result"));
 
-        assertThatCode(() -> taskStatusService.executeTask(run)).doesNotThrowAnyException();
+        assertThatCode(() -> taskRunner.executeTask(run)).doesNotThrowAnyException();
 
         verify(taskUpdateService).updateTaskStatus(
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
@@ -475,7 +479,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenReturn(false);
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         verify(taskUpdateService).updateTaskStatus(
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
@@ -552,7 +556,7 @@ class TaskStatusServiceTest {
         when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenReturn(Optional.of(TaskStatus.FAILED));
 
-        taskStatusService.executeTask(run);
+        taskRunner.executeTask(run);
 
         InOrder order = inOrder(taskUpdateService, taskMetrics);
         order.verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
@@ -569,7 +573,7 @@ class TaskStatusServiceTest {
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
         )).thenThrow(new TransactionSystemException("Commit failed"));
 
-        assertThatCode(() -> taskStatusService.executeTask(taskRun(500))).doesNotThrowAnyException();
+        assertThatCode(() -> taskRunner.executeTask(taskRun(500))).doesNotThrowAnyException();
 
         verify(taskUpdateService).updateTaskStatus(
             TASK_ID, EXECUTION_ID, TaskStatus.COMPLETED, 100, "Task completed"
@@ -587,7 +591,7 @@ class TaskStatusServiceTest {
         when(taskUpdateService.failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed"))
             .thenThrow(new TransactionSystemException("Commit failed"));
 
-        assertThatCode(() -> taskStatusService.executeTask(taskRun(500))).doesNotThrowAnyException();
+        assertThatCode(() -> taskRunner.executeTask(taskRun(500))).doesNotThrowAnyException();
 
         verify(taskUpdateService).failTaskAttempt(TASK_ID, EXECUTION_ID, 0, "Task failed");
         verify(taskMetrics).recordResultSaveError();
@@ -601,7 +605,7 @@ class TaskStatusServiceTest {
     }
 
     private TaskRun taskRun(long duration) {
-        return new TaskRun(TASK_ID, EVENT_ID, EXECUTION_ID, duration, taskStatusService.nanoTime() + TIMING.leaseNanos());
+        return new TaskRun(TASK_ID, EVENT_ID, EXECUTION_ID, duration, taskRunner.nanoTime() + TIMING.leaseNanos());
     }
 
     private boolean executeInInterruptedThread(TaskRun run) throws InterruptedException {
@@ -621,12 +625,12 @@ class TaskStatusServiceTest {
                 if (interruptBeforeStart) {
                     Thread.currentThread().interrupt();
                 }
-                taskStatusService.executeTask(run);
+                taskRunner.executeTask(run);
                 interruptRestored.set(Thread.currentThread().isInterrupted());
             } catch (Throwable ex) {
                 failure.set(ex);
             }
-        }, "task-status-interruption-test");
+        }, "task-runner-interruption-test");
         worker.setDaemon(true);
         worker.start();
 

@@ -1,6 +1,6 @@
 package com.example.taskapplication.service.execution;
 
-import com.example.taskapplication.config.WorkerTimingProperties;
+import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
 import lombok.RequiredArgsConstructor;
@@ -17,7 +17,7 @@ import java.util.Optional;
 public class TaskUpdateService {
 
     private final TaskRepository taskRepository;
-    private final WorkerTimingProperties workerTiming;
+    private final WorkerProperties workerProperties;
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public boolean updateProgress(Long id, UUID executionId, int progress) {
@@ -25,7 +25,7 @@ public class TaskUpdateService {
             throw new IllegalArgumentException("Progress must be between 0 and 99 while a task is running");
         }
         return taskRepository.updateProgress(
-            id, executionId, TaskStatus.IN_PROGRESS.name(), progress, workerTiming.leaseSeconds()
+            id, executionId, TaskStatus.IN_PROGRESS.name(), progress, workerProperties.leaseSeconds()
         ) == 1;
     }
 
@@ -40,7 +40,7 @@ public class TaskUpdateService {
             throw new IllegalArgumentException("Progress must be between 0 and 100");
         }
         return taskRepository.failExecution(
-            id, executionId, Math.min(progress, 99), result, workerTiming.retryBackoffSeconds()
+            id, executionId, Math.min(progress, 99), result, workerProperties.retryBackoffSeconds()
         ).map(TaskStatus::valueOf);
     }
 

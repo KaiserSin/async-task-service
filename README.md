@@ -88,7 +88,7 @@ Each poll (`worker.poll-delay-ms`, 1 second by default) starts at most one probe
 
 ## Task handlers and at-least-once execution
 
-`TaskHandler.handleStep(run, elapsedMillis, stepMillis)` performs one bounded step. `TaskStatusService` calls it repeatedly and manages progress, heartbeat, lease and final status. The default `DemoTaskHandler` only waits for `stepMillis`; replace it with your business implementation. Handlers must keep each call within the `stepMillis` budget, honor interruption and leave status updates to the service; set I/O timeouts accordingly.
+`TaskHandler.handleStep(run, elapsedMillis, stepMillis)` performs one bounded step. `TaskRunner` calls it repeatedly and manages progress, heartbeat, lease and final status. The default `DemoTaskHandler` only waits for `stepMillis`; replace it with your business implementation. Handlers must keep each call within the `stepMillis` budget, honor interruption and leave status updates to the service; set I/O timeouts accordingly.
 
 Execution is **at-least-once**: work may repeat after a crash, lease expiry, an automatic retry or a manual retry. For example, a worker can create a report and crash before saving COMPLETED, so the next attempt creates the report again. Automatic retries stop when `max_attempts` is exhausted; successful completion is not guaranteed.
 

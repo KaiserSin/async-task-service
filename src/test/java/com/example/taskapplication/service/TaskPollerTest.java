@@ -1,9 +1,10 @@
 package com.example.taskapplication.service;
 
 import com.example.taskapplication.config.WorkerConfig;
+import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.dto.TaskRun;
-import com.example.taskapplication.service.execution.TaskExecutionService;
-import com.example.taskapplication.service.execution.TaskStatusService;
+import com.example.taskapplication.service.execution.TaskClaimService;
+import com.example.taskapplication.service.execution.TaskRunner;
 import com.example.taskapplication.service.execution.WorkerLifecycle;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,10 +41,10 @@ import static org.mockito.Mockito.when;
 class TaskPollerTest {
 
     @Mock
-    private TaskExecutionService executionService;
+    private TaskClaimService taskClaimService;
 
     @Mock
-    private TaskStatusService statusService;
+    private TaskRunner taskRunner;
 
     private final List<CountDownLatch> releases = new ArrayList<>();
     private ThreadPoolExecutor executor;
@@ -52,9 +53,12 @@ class TaskPollerTest {
 
     @BeforeEach
     void setUp() {
-        executor = new WorkerConfig().taskExecutor(4);
-        lifecycle = new WorkerLifecycle(executor, mock(KafkaListenerEndpointRegistry.class));
-        poller = new TaskPoller(lifecycle, executionService, statusService);
+        WorkerProperties properties = new WorkerProperties(30, 30, 5,
+            new WorkerProperties.Pool(4), new WorkerProperties.Shutdown(75, 10),
+            new WorkerProperties.Cleanup(30, 90, 500));
+        executor = new WorkerConfig().taskExecutor(properties);
+        lifecycle = new WorkerLifecycle(executor, mock(KafkaListenerEndpointRegistry.class), properties);
+        poller = new TaskPoller(lifecycle, taskClaimService, taskRunner);
     }
 
     @AfterEach
@@ -70,32 +74,32 @@ class TaskPollerTest {
 
     @Test
     void emptyQueueMakesOneClaimPerPollRegardlessOfPoolSize() {
-        when(executionService.claimNextTask()).thenReturn(Optional.empty());
+        when(taskClaimService.claimNextTask()).thenReturn(Optional.empty());
 
         poller.processTask();
         awaitCompletedWorkers(1);
-        verify(executionService).claimNextTask();
+        verify(taskClaimService).claimNextTask();
         assertThat(executor.getTaskCount()).isEqualTo(1);
-        verifyNoInteractions(statusService);
+        verifyNoInteractions(taskRunner);
 
         poller.processTask();
         awaitCompletedWorkers(2);
-        verify(executionService, times(2)).claimNextTask();
+        verify(taskClaimService, times(2)).claimNextTask();
         assertThat(executor.getTaskCount()).isEqualTo(2);
-        verifyNoInteractions(statusService);
+        verifyNoInteractions(taskRunner);
     }
 
     @Test
     void failedClaimDoesNotStartAnotherWorker() {
-        when(executionService.claimNextTask())
+        when(taskClaimService.claimNextTask())
             .thenThrow(new CannotCreateTransactionException("Database unavailable"));
 
         poller.processTask();
 
         awaitCompletedWorkers(1);
-        verify(executionService).claimNextTask();
+        verify(taskClaimService).claimNextTask();
         assertThat(executor.getTaskCount()).isEqualTo(1);
-        verifyNoInteractions(statusService);
+        verifyNoInteractions(taskRunner);
     }
 
     @Test
@@ -104,25 +108,25 @@ class TaskPollerTest {
         for (long id = 1; id <= 5; id++) {
             ready.add(run(id));
         }
-        when(executionService.claimNextTask()).thenAnswer(invocation -> Optional.ofNullable(ready.poll()));
+        when(taskClaimService.claimNextTask()).thenAnswer(invocation -> Optional.ofNullable(ready.poll()));
         CountDownLatch started = new CountDownLatch(4);
         CountDownLatch release = releaseLatch();
         doAnswer(invocation -> {
             started.countDown();
             hold(release);
             return null;
-        }).when(statusService).executeTask(any(TaskRun.class));
+        }).when(taskRunner).executeTask(any(TaskRun.class));
 
         poller.processTask();
 
         assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(executor.getActiveCount()).isEqualTo(4);
-        verify(executionService, times(4)).claimNextTask();
+        verify(taskClaimService, times(4)).claimNextTask();
         assertThat(ready).hasSize(1);
 
         poller.processTask();
 
-        verify(executionService, times(4)).claimNextTask();
+        verify(taskClaimService, times(4)).claimNextTask();
         assertThat(ready).hasSize(1);
         assertThat(executor.getTaskCount()).isEqualTo(4);
     }
@@ -133,7 +137,7 @@ class TaskPollerTest {
         TaskRun second = run(2);
         Queue<TaskRun> ready = new ConcurrentLinkedQueue<>();
         ready.add(first);
-        when(executionService.claimNextTask()).thenAnswer(invocation -> Optional.ofNullable(ready.poll()));
+        when(taskClaimService.claimNextTask()).thenAnswer(invocation -> Optional.ofNullable(ready.poll()));
         CountDownLatch firstStarted = new CountDownLatch(1);
         CountDownLatch secondStarted = new CountDownLatch(1);
         CountDownLatch release = releaseLatch();
@@ -146,12 +150,12 @@ class TaskPollerTest {
             }
             hold(release);
             return null;
-        }).when(statusService).executeTask(any(TaskRun.class));
+        }).when(taskRunner).executeTask(any(TaskRun.class));
 
         poller.processTask();
         assertThat(firstStarted.await(5, TimeUnit.SECONDS)).isTrue();
         awaitCompletedWorkers(1);
-        verify(executionService, times(2)).claimNextTask();
+        verify(taskClaimService, times(2)).claimNextTask();
 
         ready.add(second);
         poller.processTask();
@@ -160,9 +164,9 @@ class TaskPollerTest {
         awaitCompletedWorkers(2);
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
             assertThat(executor.getActiveCount()).isEqualTo(2));
-        verify(statusService).executeTask(first);
-        verify(statusService).executeTask(second);
-        verify(executionService, times(4)).claimNextTask();
+        verify(taskRunner).executeTask(first);
+        verify(taskRunner).executeTask(second);
+        verify(taskClaimService, times(4)).claimNextTask();
     }
 
     @Test
@@ -172,7 +176,7 @@ class TaskPollerTest {
         poller.processTask();
 
         assertThat(executor.getTaskCount()).isZero();
-        verifyNoInteractions(executionService, statusService);
+        verifyNoInteractions(taskClaimService, taskRunner);
     }
 
     @Test
@@ -182,7 +186,7 @@ class TaskPollerTest {
         poller.processTask();
 
         assertThat(executor.getTaskCount()).isZero();
-        verifyNoInteractions(executionService, statusService);
+        verifyNoInteractions(taskClaimService, taskRunner);
     }
 
     @Test
@@ -190,7 +194,7 @@ class TaskPollerTest {
         TaskRun claimed = run(1);
         CountDownLatch claimStarted = new CountDownLatch(1);
         CountDownLatch releaseClaim = releaseLatch();
-        when(executionService.claimNextTask()).thenAnswer(invocation -> {
+        when(taskClaimService.claimNextTask()).thenAnswer(invocation -> {
             claimStarted.countDown();
             hold(releaseClaim);
             return Optional.of(claimed);
@@ -202,8 +206,8 @@ class TaskPollerTest {
         releaseClaim.countDown();
 
         awaitCompletedWorkers(1);
-        verify(executionService).claimNextTask();
-        verify(statusService).executeTask(claimed);
+        verify(taskClaimService).claimNextTask();
+        verify(taskRunner).executeTask(claimed);
         assertThat(executor.getTaskCount()).isEqualTo(1);
     }
 

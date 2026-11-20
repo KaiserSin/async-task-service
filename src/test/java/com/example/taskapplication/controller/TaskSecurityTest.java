@@ -30,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.test.util.ReflectionTestUtils.setField;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -255,16 +256,15 @@ class TaskSecurityTest {
     }
 
     private Task ownedTask(TaskStatus status, String owner) {
-        Task task = TaskApiTest.task(status == TaskStatus.NEW ? TaskStatus.NEW : TaskStatus.COMPLETED);
-        task.setStatus(status);
-        task.setOwnerUsername(owner);
+        Task task = TaskApiTest.task(status == TaskStatus.NEW ? TaskStatus.NEW : TaskStatus.COMPLETED, owner);
+        setField(task, "status", status);
         if (status == TaskStatus.FAILED) {
-            task.setAttempts(3);
-            task.setProgress(42);
-            task.setResult("Task failed");
+            setField(task, "attempts", 3);
+            setField(task, "progress", 42);
+            setField(task, "result", "Task failed");
         } else if (status == TaskStatus.IN_PROGRESS) {
-            task.setFinishedAt(null);
-            task.setProgress(40);
+            setField(task, "finishedAt", null);
+            setField(task, "progress", 40);
         }
         return taskRepository.saveAndFlush(task);
     }

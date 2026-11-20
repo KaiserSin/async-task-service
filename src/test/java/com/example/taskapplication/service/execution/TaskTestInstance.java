@@ -3,7 +3,7 @@ package com.example.taskapplication.service.execution;
 import com.example.taskapplication.TaskApplication;
 import com.example.taskapplication.config.TransactionConfig;
 import com.example.taskapplication.config.WorkerConfig;
-import com.example.taskapplication.config.WorkerTimingProperties;
+import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.metrics.TaskMetrics;
 import com.example.taskapplication.model.Task;
@@ -100,6 +100,9 @@ public class TaskTestInstance {
             "--worker.recovery-delay-ms=100",
             "--worker.cleanup.cron=-"
         ));
+        if (mode.equals("beforeCommit")) {
+            arguments.add("--worker.claim-timeout-seconds=60");
+        }
         if (!shutdown || mode.equals("shutdownInterrupted")) {
             arguments.add("--worker.shutdown.grace-period-seconds=1");
             arguments.add("--worker.shutdown.interrupt-wait-seconds=" + (shutdown ? 10 : 1));
@@ -132,7 +135,7 @@ public class TaskTestInstance {
                     signal("AFTER_COMMIT", run);
                     awaitContinue();
                 }
-                case "duringWork", "afterEffect" -> context.getBean(TaskStatusService.class).executeTask(run);
+                case "duringWork", "afterEffect" -> context.getBean(TaskRunner.class).executeTask(run);
                 case "oldWorker" -> {
                     if (!updates.updateProgress(run.id(), run.executionId(), 20)) {
                         throw new IllegalStateException("Failed to save progress for the old attempt");
@@ -177,7 +180,7 @@ public class TaskTestInstance {
 
     @TestConfiguration(proxyBeanMethods = false)
     @EnableAutoConfiguration(exclude = KafkaAutoConfiguration.class)
-    @EnableConfigurationProperties(WorkerTimingProperties.class)
+    @EnableConfigurationProperties(WorkerProperties.class)
     @EntityScan(basePackageClasses = Task.class)
     @EnableJpaRepositories(basePackageClasses = TaskRepository.class)
     @Import({TaskClaimService.class, TaskUpdateService.class, TaskRecoveryService.class, TaskMetrics.class, Worker.class})
@@ -186,12 +189,11 @@ public class TaskTestInstance {
         @Bean
         TransactionTemplate claimTransactionTemplate(
             PlatformTransactionManager transactionManager,
+            WorkerProperties workerProperties,
             @Value("${test.mode}") String mode
         ) {
-
-            int timeout = mode.equals("beforeCommit") ? 60 : 5;
             TransactionTemplate settings = new TransactionConfig()
-                .claimTransactionTemplate(transactionManager, timeout);
+                .claimTransactionTemplate(transactionManager, workerProperties);
             return new TransactionTemplate(transactionManager, settings) {
                 @Override
                 public <T> T execute(TransactionCallback<T> action) {
@@ -211,10 +213,10 @@ public class TaskTestInstance {
         }
 
         @Bean
-        TaskStatusService taskStatusService(
+        TaskRunner taskRunner(
             TaskUpdateService updates,
             TaskMetrics taskMetrics,
-            WorkerTimingProperties timingProperties,
+            WorkerProperties workerProperties,
             JdbcTemplate jdbcTemplate,
             @Value("${test.mode}") String mode
         ) {
@@ -237,7 +239,7 @@ public class TaskTestInstance {
                     }
                 }
             };
-            return new TaskStatusService(updates, taskMetrics, handler, timingProperties) {
+            return new TaskRunner(updates, taskMetrics, handler, workerProperties) {
                 @Override
                 public void executeTask(TaskRun run) {
                     signal("CLAIMED", run);
@@ -259,7 +261,7 @@ public class TaskTestInstance {
     @ConditionalOnProperty(name = "test.worker", havingValue = "true")
     @EnableScheduling
     @Import({WorkerConfig.class, TaskPoller.class, MaintenanceScheduler.class, WorkerLifecycle.class,
-        TaskExecutionService.class, TaskCleanupService.class})
+        TaskCleanupService.class})
     static class Worker {
 
         @Bean
@@ -274,10 +276,10 @@ public class TaskTestInstance {
 
         @Bean
         @Primary
-        TaskStatusService shutdownTaskStatusService(
+        TaskRunner shutdownTaskRunner(
             TaskUpdateService updates,
             TaskMetrics metrics,
-            WorkerTimingProperties timingProperties,
+            WorkerProperties workerProperties,
             @Value("${test.mode}") String mode
         ) {
             AtomicBoolean started = new AtomicBoolean();
@@ -291,7 +293,7 @@ public class TaskTestInstance {
                 }
                 demo.handleStep(run, elapsedMillis, stepMillis);
             };
-            return new TaskStatusService(updates, metrics, handler, timingProperties) {
+            return new TaskRunner(updates, metrics, handler, workerProperties) {
                 @Override
                 public void executeTask(TaskRun run) {
                     super.executeTask(run);

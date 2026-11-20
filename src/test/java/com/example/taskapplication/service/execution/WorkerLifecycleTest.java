@@ -1,5 +1,6 @@
 package com.example.taskapplication.service.execution;
 
+import com.example.taskapplication.config.WorkerProperties;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -10,7 +11,6 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.listener.MessageListenerContainer;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.concurrent.RejectedExecutionException;
@@ -41,13 +41,15 @@ class WorkerLifecycleTest {
     @Mock
     private KafkaListenerEndpointRegistry listeners;
 
+    private final WorkerProperties properties = new WorkerProperties(30, 30, 5,
+        new WorkerProperties.Pool(4), new WorkerProperties.Shutdown(1, 1),
+        new WorkerProperties.Cleanup(30, 90, 500));
+
     private WorkerLifecycle lifecycle;
 
     @BeforeEach
     void setUp() {
-        lifecycle = new WorkerLifecycle(executor, listeners);
-        ReflectionTestUtils.setField(lifecycle, "shutdownGracePeriodSeconds", 1L);
-        ReflectionTestUtils.setField(lifecycle, "shutdownInterruptWaitSeconds", 1L);
+        lifecycle = new WorkerLifecycle(executor, listeners, properties);
     }
 
     @AfterEach
@@ -153,6 +155,7 @@ class WorkerLifecycleTest {
             context.registerBean(ThreadPoolExecutor.class, () -> executor,
                 definition -> definition.setDestroyMethodName(""));
             context.registerBean(KafkaListenerEndpointRegistry.class, () -> listeners);
+            context.registerBean(WorkerProperties.class, () -> properties);
             context.register(WorkerLifecycle.class);
             context.refresh();
             registered = context.getBean(WorkerLifecycle.class);

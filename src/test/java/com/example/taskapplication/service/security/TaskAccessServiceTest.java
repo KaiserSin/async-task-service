@@ -1,6 +1,7 @@
 package com.example.taskapplication.service.security;
 
 import com.example.taskapplication.model.Task;
+import com.example.taskapplication.model.TaskFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -81,8 +82,6 @@ class TaskAccessServiceTest {
     }
 
     private Task task(String owner) {
-        Task task = new Task();
-        task.setOwnerUsername(owner);
-        return task;
+        return TaskFixtures.task(null, owner, "Task", 1_000L);
     }
 }

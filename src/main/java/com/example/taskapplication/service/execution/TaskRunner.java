@@ -1,6 +1,6 @@
 package com.example.taskapplication.service.execution;
 
-import com.example.taskapplication.config.WorkerTimingProperties;
+import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.dto.TaskRun;
 import com.example.taskapplication.metrics.TaskMetrics;
 import com.example.taskapplication.model.TaskStatus;
@@ -15,12 +15,12 @@ import java.util.concurrent.TimeUnit;
 @Service
 @Slf4j
 @RequiredArgsConstructor
-public class TaskStatusService {
+public class TaskRunner {
 
     private final TaskUpdateService taskUpdateService;
     private final TaskMetrics taskMetrics;
     private final TaskHandler taskHandler;
-    private final WorkerTimingProperties workerTiming;
+    private final WorkerProperties workerProperties;
 
     public void executeTask(TaskRun run) {
         long startedAt = System.nanoTime();
@@ -63,7 +63,7 @@ public class TaskStatusService {
                                 run.executionId(), run.id());
                             return;
                         }
-                        leaseDeadline = heartbeatStartedAt + workerTiming.leaseNanos();
+                        leaseDeadline = heartbeatStartedAt + workerProperties.leaseNanos();
                     } catch (DataAccessException | TransactionException e) {
                         log.warn("Could not renew lease for attempt {} of task {}; continuing within its confirmed lease",
                             run.executionId(), run.id(), e);

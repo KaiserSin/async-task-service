@@ -9,9 +9,9 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
-import lombok.Setter;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -19,8 +19,7 @@ import java.util.UUID;
 @Entity
 @Table(name = "tasks")
 @Getter
-@Setter
-@NoArgsConstructor
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class Task {
 
     @Id
@@ -76,4 +75,21 @@ public class Task {
     @Version
     @Column(nullable = false)
     private Long version;
+
+    public boolean resetForRetry() {
+        if (status != TaskStatus.FAILED) {
+            return false;
+        }
+
+        status = TaskStatus.NEW;
+        executionId = null;
+        leaseUntil = null;
+        nextRetryAt = null;
+        attempts = 0;
+        startedAt = null;
+        finishedAt = null;
+        progress = 0;
+        result = null;
+        return true;
+    }
 }

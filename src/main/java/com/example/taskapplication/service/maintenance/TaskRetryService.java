@@ -2,7 +2,6 @@ package com.example.taskapplication.service.maintenance;
 
 import com.example.taskapplication.exception.TaskNotFoundException;
 import com.example.taskapplication.model.Task;
-import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
 import com.example.taskapplication.service.security.TaskAccessService;
 import lombok.RequiredArgsConstructor;
@@ -26,19 +25,10 @@ public class TaskRetryService {
             .filter(taskAccessService::canAccess)
             .orElseThrow(() -> new TaskNotFoundException(id));
 
-        if (task.getStatus() != TaskStatus.FAILED) {
+        if (!task.resetForRetry()) {
             return false;
         }
 
-        task.setStatus(TaskStatus.NEW);
-        task.setExecutionId(null);
-        task.setLeaseUntil(null);
-        task.setNextRetryAt(null);
-        task.setAttempts(0);
-        task.setStartedAt(null);
-        task.setFinishedAt(null);
-        task.setProgress(0);
-        task.setResult(null);
         log.info("Manual retry requested by {} for task {}",
             SecurityContextHolder.getContext().getAuthentication().getName(), id);
         return true;

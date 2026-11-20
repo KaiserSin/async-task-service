@@ -1,6 +1,6 @@
 package com.example.taskapplication.service.execution;
 
-import com.example.taskapplication.config.WorkerTimingProperties;
+import com.example.taskapplication.config.WorkerProperties;
 import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,7 +31,9 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class TaskUpdateServiceTest {
 
-    private static final WorkerTimingProperties TIMING = new WorkerTimingProperties(47, 7);
+    private static final WorkerProperties TIMING = new WorkerProperties(47, 7, 5,
+        new WorkerProperties.Pool(4), new WorkerProperties.Shutdown(75, 10),
+        new WorkerProperties.Cleanup(30, 90, 500));
 
     private static final Long TASK_ID = 7L;
     private static final UUID EXECUTION_ID = UUID.fromString("cc258051-0eba-4ede-9311-eb59eb55609a");

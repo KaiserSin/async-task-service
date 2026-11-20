@@ -3,6 +3,7 @@ package com.example.taskapplication.controller;
 import com.example.taskapplication.config.SecurityConfig;
 import com.example.taskapplication.exception.GlobalExceptionHandler;
 import com.example.taskapplication.model.Task;
+import com.example.taskapplication.model.TaskFixtures;
 import com.example.taskapplication.model.TaskStatus;
 import com.example.taskapplication.repository.TaskRepository;
 import com.example.taskapplication.service.database.DatabaseFailureClassifier;
@@ -56,6 +57,7 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.Mockito.doThrow;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
+import static org.springframework.test.util.ReflectionTestUtils.setField;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -284,19 +286,21 @@ class TaskApiTest {
     }
 
     static Task task(TaskStatus taskStatus) {
-        Task task = new Task();
-        task.setEventId(UUID.randomUUID());
-        task.setName("Task");
-        task.setDuration(2500L);
-        task.setCreatedAt(Instant.parse("2026-01-01T10:00:00Z"));
+        return task(taskStatus, null);
+    }
+
+    static Task task(TaskStatus taskStatus, String owner) {
+        Task task = TaskFixtures.task(UUID.randomUUID(), owner, "Task", 2500L);
+        Instant createdAt = Instant.parse("2026-01-01T10:00:00Z");
+        setField(task, "createdAt", createdAt);
         if (taskStatus == TaskStatus.COMPLETED) {
-            task.setStatus(TaskStatus.COMPLETED);
-            task.setProgress(100);
-            task.setResult("Done");
-            task.setExecutionId(UUID.randomUUID());
-            task.setAttempts(1);
-            task.setStartedAt(task.getCreatedAt().plusSeconds(1));
-            task.setFinishedAt(task.getCreatedAt().plusSeconds(4));
+            setField(task, "status", TaskStatus.COMPLETED);
+            setField(task, "progress", 100);
+            setField(task, "result", "Done");
+            setField(task, "executionId", UUID.randomUUID());
+            setField(task, "attempts", 1);
+            setField(task, "startedAt", createdAt.plusSeconds(1));
+            setField(task, "finishedAt", createdAt.plusSeconds(4));
         }
         return task;
     }

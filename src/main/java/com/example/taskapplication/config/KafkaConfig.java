@@ -11,7 +11,6 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -41,14 +40,8 @@ import java.util.UUID;
 
 @Configuration
 @EnableKafka
-@EnableConfigurationProperties(KafkaProperties.class)
+@EnableConfigurationProperties({KafkaProperties.class, KafkaListenerProperties.class})
 public class KafkaConfig {
-
-    @Value("${kafka.listener.concurrency:1}")
-    private int concurrency;
-
-    @Value("${kafka.listener.database-retry-delay-ms:10000}")
-    private long databaseRetryDelayMs;
 
     @Bean
     public ConsumerFactory<String, TaskRequestDTO> consumerFactory(KafkaProperties kafkaProperties) {
@@ -104,7 +97,8 @@ public class KafkaConfig {
     public DefaultAfterRollbackProcessor<String, TaskRequestDTO> kafkaAfterRollbackProcessor(
         KafkaTemplate<String, Object> dltKafkaTemplate,
         DatabaseFailureClassifier databaseFailureClassifier,
-        TaskScheduler taskScheduler
+        TaskScheduler taskScheduler,
+        KafkaListenerProperties listenerProperties
     ) {
         DeadLetterPublishingRecoverer recoverer =
             new DeadLetterPublishingRecoverer(
@@ -123,7 +117,7 @@ public class KafkaConfig {
             dltKafkaTemplate,
             databaseFailureClassifier,
             taskScheduler,
-            databaseRetryDelayMs
+            listenerProperties.databaseRetryDelayMs()
         );
         processor.addNotRetryableExceptions(
             ConstraintViolationException.class,
@@ -137,16 +131,13 @@ public class KafkaConfig {
     kafkaListenerContainerFactory(
         ConsumerFactory<String, TaskRequestDTO> consumerFactory,
         ProducerFactory<String, Object> dltProducerFactory,
-        DefaultAfterRollbackProcessor<String, TaskRequestDTO> kafkaAfterRollbackProcessor
+        DefaultAfterRollbackProcessor<String, TaskRequestDTO> kafkaAfterRollbackProcessor,
+        KafkaListenerProperties listenerProperties
     ) {
-        if (concurrency < 1) {
-            throw new IllegalArgumentException("Kafka concurrency must be greater than 0");
-        }
-
         var factory =
             new ConcurrentKafkaListenerContainerFactory<String, TaskRequestDTO>();
         factory.setConsumerFactory(consumerFactory);
-        factory.setConcurrency(concurrency);
+        factory.setConcurrency(listenerProperties.concurrency());
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
         factory.getContainerProperties().setPauseImmediate(true);
         factory.getContainerProperties().setStopImmediate(true);

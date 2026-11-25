@@ -1,6 +1,6 @@
 spring:
   application:
-    name: task-application
+    name: payment-service
   lifecycle:
     timeout-per-shutdown-phase: 5s
   task:
@@ -8,7 +8,7 @@ spring:
       pool:
         size: 4
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5432/taskdb}
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/paymentdb}
     username: ${DB_USERNAME:user}
     password: ${DB_PASSWORD:${POSTGRES_PASSWORD:}}
     hikari:
@@ -21,7 +21,7 @@ spring:
       leak-detection-threshold: 60000
       transaction-isolation: TRANSACTION_READ_COMMITTED
       register-mbeans: true
-      pool-name: TaskServicePool
+      pool-name: PaymentServicePool
       data-source-properties:
         connectTimeout: 5
         socketTimeout: 10
@@ -34,15 +34,18 @@ spring:
       hibernate:
         jdbc:
           time_zone: UTC
-  flyway:
-    enabled: true
-    locations: classpath:db/migration
-    postgresql:
-      transactional-lock: false
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     consumer:
-      group-id: task-group
+      group-id: payment-group
+
+payment:
+  registration:
+    max-new-operations-per-minute-per-owner: ${PAYMENT_MAX_NEW_OPERATIONS_PER_MINUTE_PER_OWNER:10}
+
+stripe:
+  secret-key: ${STRIPE_SECRET_KEY}
+  webhook-secret: ${STRIPE_WEBHOOK_SECRET}
 
 worker:
   pool:
@@ -63,7 +66,7 @@ worker:
     cron: "0 0 */12 * * *"
 
 kafka:
-  topic: tasks
+  topic: payments
   listener:
     concurrency: 1
     database-retry-delay-ms: 10000
@@ -71,11 +74,11 @@ kafka:
 api:
   security:
     users:
-      - username: ${TASK_API_USERNAME:user}
-        password: ${TASK_API_PASSWORD:}
+      - username: ${PAYMENT_API_USERNAME:user}
+        password: ${PAYMENT_API_PASSWORD:}
         roles: [USER]
-      - username: ${TASK_API_ADMIN_USERNAME:admin}
-        password: ${TASK_API_ADMIN_PASSWORD:}
+      - username: ${PAYMENT_API_ADMIN_USERNAME:admin}
+        password: ${PAYMENT_API_ADMIN_PASSWORD:}
         roles: [ADMIN]
 
 server:

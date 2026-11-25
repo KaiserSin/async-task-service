@@ -1,0 +1,15 @@
+package com.example.payment.domain;
+
+public enum PaymentStatus {
+    NOT_SUBMITTED,
+    REQUEST_REJECTED,
+    UNKNOWN,
+    AWAITING_WEBHOOK,
+    REQUIRES_PAYMENT_METHOD,
+    REQUIRES_CONFIRMATION,
+    REQUIRES_ACTION,
+    PROCESSING,
+    REQUIRES_CAPTURE,
+    CANCELED,
+    SUCCEEDED
+}

@@ -1,5 +1,5 @@
 target/*
-!target/task-service.jar
+!target/payment-service.jar
 .git/
 .idea/
 *.iml

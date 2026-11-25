@@ -11,7 +11,6 @@ api:
         password: admin-test-password
         roles: [ADMIN]
 
-# MockMvc tests share the application context and do not open a management socket.
 management:
   server:
     port:

@@ -14,7 +14,7 @@ EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 
 FROM runtime AS ci
-COPY target/task-service.jar /app/app.jar
+COPY target/payment-service.jar /app/app.jar
 
 FROM runtime AS app
-COPY --from=build /build/target/task-service.jar /app/app.jar
+COPY --from=build /build/target/payment-service.jar /app/app.jar

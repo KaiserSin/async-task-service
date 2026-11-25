@@ -1,4 +1,4 @@
-name: task-application
+name: payment-service
 
 services:
   app:
@@ -16,16 +16,19 @@ services:
       SPRING_PROFILES_ACTIVE: "${SPRING_PROFILES_ACTIVE:-prod}"
       MANAGEMENT_SERVER_PORT: "9091"
       MANAGEMENT_SERVER_ADDRESS: "0.0.0.0"
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/taskdb
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/paymentdb
       SPRING_DATASOURCE_USERNAME: user
       SPRING_DATASOURCE_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       WORKER_POOL_SIZE: "4"
-      KAFKA_TOPIC: tasks
-      TASK_API_USERNAME: "${TASK_API_USERNAME:-user}"
-      TASK_API_PASSWORD: "${TASK_API_PASSWORD:?Set TASK_API_PASSWORD}"
-      TASK_API_ADMIN_USERNAME: "${TASK_API_ADMIN_USERNAME:-admin}"
-      TASK_API_ADMIN_PASSWORD: "${TASK_API_ADMIN_PASSWORD:?Set TASK_API_ADMIN_PASSWORD}"
+      KAFKA_TOPIC: payments
+      STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET:?Set the Stripe webhook signing secret}"
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:?Set a Stripe test secret key}"
+      PAYMENT_MAX_NEW_OPERATIONS_PER_MINUTE_PER_OWNER: "${PAYMENT_MAX_NEW_OPERATIONS_PER_MINUTE_PER_OWNER:-10}"
+      PAYMENT_API_USERNAME: "${PAYMENT_API_USERNAME:-user}"
+      PAYMENT_API_PASSWORD: "${PAYMENT_API_PASSWORD:?Set PAYMENT_API_PASSWORD}"
+      PAYMENT_API_ADMIN_USERNAME: "${PAYMENT_API_ADMIN_USERNAME:-admin}"
+      PAYMENT_API_ADMIN_PASSWORD: "${PAYMENT_API_ADMIN_PASSWORD:?Set PAYMENT_API_ADMIN_PASSWORD}"
     ports:
       - "127.0.0.1::8080"
     networks:
@@ -36,7 +39,7 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: taskdb
+      POSTGRES_DB: paymentdb
       POSTGRES_USER: user
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
     volumes:
@@ -46,7 +49,7 @@ services:
     networks:
       - app-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d taskdb"]
+      test: ["CMD-SHELL", "pg_isready -U user -d paymentdb"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -91,8 +94,8 @@ services:
     entrypoint: ["/bin/bash", "-ec"]
     command:
       - |
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic tasks --partitions 3 --replication-factor 1
-        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic tasks.DLT --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic payments --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic payments.DLT --partitions 3 --replication-factor 1
     networks:
       - app-network
     restart: "no"

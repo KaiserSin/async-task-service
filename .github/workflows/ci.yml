@@ -33,14 +33,14 @@ jobs:
         run: ./mvnw --batch-mode --no-transfer-progress clean verify
 
       - name: Build image from tested JAR
-        run: docker build --target ci --tag task-application:${{ github.sha }} .
+        run: docker build --target ci --tag payment-service:${{ github.sha }} .
 
       - name: Scan image vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.76.1
           scan-type: image
-          image-ref: task-application:${{ github.sha }}
+          image-ref: payment-service:${{ github.sha }}
           scanners: vuln
           vuln-type: os,library
           severity: HIGH,CRITICAL
